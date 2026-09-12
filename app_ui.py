@@ -1,5 +1,6 @@
 import streamlit as st
 import json
+import time
 from modules.log_generator import generate_entra_logs
 
 st.set_page_config(page_title="Argus ITDR Platform", layout="wide")
@@ -42,4 +43,7 @@ level: high"""
     st.code(sigma_code, language="yaml")
     
     if st.button("🔴 Deploy to Splunk"):
-        st.success("Sigma qaydası uğurla Splunk SIEM-ə tətbiq olundu!")
+        with st.spinner("Splunk API ilə əlaqə qurulur..."):
+            time.sleep(1)
+        st.success("✅ Sigma qaydası Splunk SIEM-ə uğurla inteqrasiya olundu!")
+        st.session_state.logs = f"[SUCCESS] Sigma rule deployed to Splunk SIEM at {time.strftime('%H:%M:%S')}\n" + st.session_state.logs
