@@ -1,4 +1,6 @@
 import streamlit as st
+import json
+from modules.log_generator import generate_entra_logs
 
 st.set_page_config(page_title="Argus ITDR Platform", layout="wide")
 st.title("🛡️ Argus ITDR Platform")
@@ -9,14 +11,21 @@ mode = st.sidebar.radio("Modu seçin:", ["Simulation Mode", "Live Detection", "F
 
 col1, col2 = st.columns([1, 1])
 
+# Session state initialization for logs
+if "logs" not in st.session_state:
+    st.session_state.logs = "[INFO] Entra ID logları gözlənilir...\n[INFO] Splunk connector active."
+
 # Orta panel: Attack Simulation & Logs
 with col1:
     st.subheader("⚡ Attack Simulation")
     if st.button("🚀 Start Attack"):
-        st.warning("Hücum simulyasiyası başladıldı...")
+        new_log = generate_entra_logs()
+        formatted_log = json.dumps(new_log, indent=2)
+        st.session_state.logs = f"[ALERT] Simulated Attack Event Generated:\n{formatted_log}\n\n" + st.session_state.logs
+        st.warning("Hücum simulyasiyası işə salındı və log yaradıldı!")
     
     st.subheader("📋 Log Pəncərəsi")
-    st.text_area("Sistem Logları:", value="[INFO] Entra ID logları gözlənilir...\n[INFO] Splunk connector active.", height=180)
+    st.text_area("Sistem Logları:", value=st.session_state.logs, height=250)
 
 # Sağ panel: AI Sigma Rule & Deploy Button
 with col2:
