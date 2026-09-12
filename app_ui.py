@@ -52,24 +52,29 @@ with col1:
     st.subheader("System Logs")
     st.text_area("Console Output:", value=st.session_state.logs, height=280)
 
-# Sağ panel: Dinamik AI Sigma Generation
+# Sağ panel: Advanced Dynamic AI Sigma Generation
 with col2:
     st.subheader("Generated Sigma Rule")
     
     event = st.session_state.parsed_event
     
     if event and isinstance(event, dict):
-        detected_action = event.get("action") or event.get("event") or event.get("type") or "Unknown_Activity"
-        detected_service = event.get("service") or event.get("source") or "generic_web_app"
-        detected_user = event.get("actor") or event.get("user") or event.get("username") or "any_user"
+        detected_action = event.get("action") or event.get("event") or event.get("type") or event.get("title") or "Generic_Activity"
+        detected_service = event.get("service") or event.get("source") or "generic_api_endpoint"
+        detected_user = event.get("actor") or event.get("user") or event.get("username") or event.get("userId") or "system"
         
-        sigma_code = f"""title: Dynamic Detection - {detected_action}
+        # Dinamik olaraq bütün key-value cütlüklərini Sigma selection sahəsinə yığırıq
+        selection_lines = []
+        for k, v in list(event.items())[:5]: # ilk 5 xassəni qaydaya daxil edirik
+            selection_lines.append(f"    {k}: \"{v}\"")
+        selection_block = "\n".join(selection_lines)
+        
+        sigma_code = f"""title: Dynamic Ingestion Detection - {detected_action}
 logsource:
   product: {detected_service}
 detection:
   selection:
-    ActionName: "{detected_action}"
-    User: "{detected_user}"
+{selection_block}
   condition: selection
 level: high"""
     else:
