@@ -14,7 +14,7 @@ import os
 
 try:
     from dotenv import load_dotenv
-    load_dotenv()  # layihə kökündəki .env faylını (varsa) yükləyir
+    load_dotenv(override=True)  # layihə kökündəki .env faylını (varsa) yükləyir
 except ImportError:
     # python-dotenv quraşdırılmayıbsa, sadəcə mühit dəyişənlərinə etibar edirik
     pass
@@ -33,10 +33,44 @@ def _get(name: str, default: str = None, required: bool = False) -> str:
 # ----------------------------------------------------------------------
 # Wazuh SIEM Bağlantısı
 # ----------------------------------------------------------------------
+# DƏYİŞİKLİK (KÖK SƏBƏB DÜZƏLİŞİ): Argus artıq hadisələri BİRBAŞA
+# OpenSearch-in "_doc" endpoint-inə YAZMIR (bax: app_ui.py -> send_to_wazuh()).
+# Səbəb: özəl "argus-itdr-events" indeksinə birbaşa yazılan sənədlər Wazuh
+# qaydalarından (rules) keçmir, ona görə Dashboard-un Overview / Threat
+# Hunting ekranlarında (bunlar "wazuh-alerts-*" indeksinə baxır) HEÇ VAXT
+# görünmürdü — loqlar "getmirdi" kimi görünməsinin əsl səbəbi bu idi.
+#
+# İndi hadisələr lokal NDJSON fayla yazılır (aşağıda ARGUS_LOG_DIR),
+# Wazuh manager onu <localfile> ilə tail edir, local_rules.xml-dəki
+# qaydalardan keçirir və nəticəni əsl "wazuh-alerts-*" indeksinə salır.
+#
+# WAZUH_ENDPOINT / WAZUH_USER / WAZUH_PASSWORD / WAZUH_VERIFY_SSL indi
+# YALNIZ `wazuh_auditor.py`-nin audit-trail OXUMASI üçün istifadə olunur
+# (Wazuh Indexer-dən _search API-si ilə geri oxumaq üçün).
 WAZUH_ENDPOINT = _get("WAZUH_ENDPOINT", "https://localhost:9200/argus-itdr-events/_doc")
-WAZUH_USER = _get("WAZUH_USER", "admin")
-WAZUH_PASSWORD = _get("WAZUH_PASSWORD", "")  # boşdursa send_to_wazuh xəbərdarlıq edəcək
+
+# Qeyd (DÜZƏLİŞ): .env-də tarixən həm WAZUH_USER, həm də WAZUH_USERNAME
+# adı işlədilib. Əvvəlki kod yalnız WAZUH_USER-i oxuyurdu, ona görə
+# .env-də WAZUH_USERNAME yazılanda bu SƏSSİZCƏ default "admin"-ə düşürdü
+# (təsadüfən doğru qiymətlə üst-üstə düşdüyü üçün bug görünməz qalmışdı).
+# İndi ikisi də qəbul olunur.
+WAZUH_USER = _get("WAZUH_USER") or _get("WAZUH_USERNAME", "admin")
+WAZUH_PASSWORD = _get("WAZUH_PASSWORD", "")  # boşdursa audit oxuması xəbərdarlıq edəcək
 WAZUH_VERIFY_SSL = _get("WAZUH_VERIFY_SSL", "true").strip().lower() == "true"
+
+# Audit-trail (WazuhAuditor) hansı indeksi/indeks pattern-ini oxumalıdır.
+# local_rules.xml-dəki qaydalar group="argus,itdr," ilə işarələnib,
+# auditor bunu filtr kimi istifadə edir.
+WAZUH_ALERTS_INDEX = _get("WAZUH_ALERTS_INDEX", "wazuh-alerts-*")
+
+# ----------------------------------------------------------------------
+# Argus -> Wazuh manager lokal fayl körpüsü (YENİ)
+# ----------------------------------------------------------------------
+# send_to_wazuh() hadisələri bu qovluqdakı NDJSON fayla yazır. Bu qovluq
+# docker-compose.yml-də wazuh.manager konteynerinin /var/log/argus
+# qovluğuna bind-mount edilməlidir (bax: WAZUH_SETUP.md).
+ARGUS_LOG_DIR = _get("ARGUS_LOG_DIR", r"C:\Users\rkazi\wazuh-docker\single-node\argus-logs")
+ARGUS_LOG_FILENAME = _get("ARGUS_LOG_FILENAME", "itdr-events.json")
 
 # ----------------------------------------------------------------------
 # Microsoft Entra ID / MSAL (Red Team Attack Engine üçün)
@@ -60,3 +94,14 @@ ENABLE_REAL_REMEDIATION = _get("ENABLE_REAL_REMEDIATION", "false").strip().lower
 def has_graph_credentials() -> bool:
     """MSAL/Graph çağırışları üçün minimum tələb olunan dəyişənlərin mövcudluğunu yoxlayır."""
     return all([TENANT_ID, CLIENT_ID, CLIENT_SECRET])
+
+
+# ----------------------------------------------------------------------
+# AI / Sigma Rule Generator (ai_generator.py üçün)
+# ----------------------------------------------------------------------
+# "local" -> lokal Ollama, "cloud" -> OpenAI API
+AI_MODE = _get("AI_MODE", "local").strip().lower()
+OPENAI_API_KEY = _get("OPENAI_API_KEY")
+OPENAI_MODEL = _get("OPENAI_MODEL", "gpt-4o-mini")
+OLLAMA_MODEL = _get("OLLAMA_MODEL", "llama3")
+OLLAMA_HOST = _get("OLLAMA_HOST", "http://127.0.0.1:11434")

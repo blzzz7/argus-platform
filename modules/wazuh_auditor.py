@@ -14,12 +14,29 @@ Argus ITDR üçün Audit modulu. İki əsas vəzifəsi var:
 
 Bu modul `modules/config.py`-dakı eyni WAZUH_* mühit dəyişənlərini istifadə edir,
 yəni `.env`-də ayrıca heç nə əlavə etməyə ehtiyac yoxdur.
+
+DƏYİŞİKLİK (bug fix): `run_compliance_checks()`-də EventID sütunu üzərində
+birbaşa `== 4625` bərabərlik müqayisəsi var idi. Sütun mənbəyə görə (SQLite,
+CSV, ya da attack_engine-in yaratdığı DataFrame) bəzən int, bəzən str olaraq
+gəldiyi üçün bu müqayisə səssizcə False qaytarıb bütün compliance qaydalarını
+(C1, C2) yalançı "PASS" göstərirdi. Bu, `app_ui.py`-də `event_matches()` adı
+ilə artıq bir dəfə tapılıb düzəldilmiş EYNİ kök səbəb bug-ıdır — indi bu modula
+da tətbiq olunub.
 """
 import requests
 import pandas as pd
 from datetime import datetime, timedelta
 
 from . import config
+
+
+def _event_matches(series: pd.Series, code) -> pd.Series:
+    """
+    EventID sütununu tipdən asılı olmadan (int, str, ya da qarışıq) müqayisə edir.
+    `app_ui.py`-dəki `event_matches()` ilə eyni məntiq — iki yerdə fərqli davranış
+    olmasın deyə burada da tətbiq olunur.
+    """
+    return series.astype(str).str.contains(str(code), na=False)
 
 
 class WazuhAuditor:
@@ -68,7 +85,7 @@ class WazuhAuditor:
                 headers={"Content-Type": "application/json"},
                 json=body,
                 verify=self.verify_ssl,
-                timeout=10,
+                timeout=15,
             )
         except Exception as e:
             return False, f"Bağlantı xətası: {e}"
@@ -141,7 +158,10 @@ class WazuhAuditor:
         }
         event_col, user_col, ip_col = cols["event"], cols["user"], cols["ip"]
 
-        failed_df = df[df[event_col] == 4625] if event_col else df
+        # BUG FIX: əvvəllər `df[event_col] == 4625` idi — sütun tipi (int/str) mənbəyə
+        # görə dəyişəndə bu bərabərlik səssizcə False qaytarırdı və C1/C2 həmişə
+        # yalançı "PASS" göstərirdi. `_event_matches()` tipdən asılı olmadan işləyir.
+        failed_df = df[_event_matches(df[event_col], 4625)] if event_col else df
 
         # --- C1: Smart Lockout tələb edən hesablar varmı ---
         if event_col and user_col:
@@ -191,14 +211,14 @@ class WazuhAuditor:
 
         # --- C3: Zəif autentifikasiya metodları (OAuth2/NTLM = MFA-sız) ---
         if "AuthMethod" in df.columns:
-            weak_methods = df[df["AuthMethod"].astype(str).str.contains("NTLM|OAuth2", case=False, na=False)]
+            weak_methods = df[df["AuthMethod"].astype(str).str.contains("NTLM|OAuth2|PasswordSpray", case=False, na=False)]
             if len(weak_methods) > 0:
                 findings.append({
                     "id": "C3",
                     "title": "MFA-sız / köhnə autentifikasiya metodları",
                     "severity": "MEDIUM",
                     "status": "FAIL",
-                    "description": f"{len(weak_methods)} hadisə MFA tələb etməyən metodla (NTLM/OAuth2) baş verib.",
+                    "description": f"{len(weak_methods)} hadisə MFA tələb etməyən metodla (NTLM/OAuth2/Spray) baş verib.",
                     "recommendation": "Phishing-resistant MFA (FIDO2, Certificate-Based Auth) tətbiq edin, "
                                        "legacy autentifikasiyanı bloklayın."
                 })
