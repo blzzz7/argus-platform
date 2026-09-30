@@ -7,3 +7,4 @@ fpdf2
 plotly
 reportlab
 altair
+msal
