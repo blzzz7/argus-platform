@@ -7,12 +7,12 @@ Başqa təşkilatın kirayəçisinə qarşı istifadəsi qanunsuzdur və
 Microsoft-un İstifadə Şərtlərini pozur.
 
 DƏYİŞİKLİKLƏR (əvvəlki versiya ilə müqayisədə):
- 1. TENANT_ID / CLIENT_ID / CLIENT_SECRET və real istifadəçi şifrələri artıq
+1. TENANT_ID / CLIENT_ID / CLIENT_SECRET və real istifadəçi şifrələri artıq
     mənbə kodunda YOXDUR — hamısı `.env` və `data/test_identities.json`
     fayllarından oxunur (bax: config.py, .env.example).
- 2. `IdentityAttackEngine.__init__` credential-lar yoxdursa aydın xəta verir
+2. `IdentityAttackEngine.__init__` credential-lar yoxdursa aydın xəta verir
     (əvvəlki versiyada bu, `app.py`-da idarə olunmayan crash-ə səbəb olurdu).
- 3. Real Blue-Team remediation üçün iki yeni metod əlavə olunub:
+3. Real Blue-Team remediation üçün iki yeni metod əlavə olunub:
     `revoke_sign_in_sessions()` və `disable_account()` — Microsoft Graph
     app-only (client credentials) axını ilə HƏQİQİ əməliyyat aparır.
 """
@@ -64,7 +64,7 @@ def generate_wordlists():
     if not os.path.exists(USERS_FILE):
         real_users = list(REAL_CREDENTIALS.keys())
         fake_users = [f"fake_user_{i}@{DOMAIN}" for i in range(1, 100)] + \
-                     [f"corp_admin_{i}@{DOMAIN}" for i in range(1, 50)]
+                    [f"corp_admin_{i}@{DOMAIN}" for i in range(1, 50)]
         all_users = real_users + fake_users
         with open(USERS_FILE, "w", encoding="utf-8") as f:
             for u in all_users:
@@ -74,7 +74,7 @@ def generate_wordlists():
         real_passwords = list(REAL_CREDENTIALS.values())
         common_passwords = [
             "Password123!", "Admin2026!", "Welcome123!", "Spring2026!",
-            "P@ssw0rd123", "Corporate2026!", "ChangeMe123!", "Company123!"
+            "Security123!Entra", "Corporate2026!", "ChangeMe123!", "Company123!"
         ]
         all_passwords = common_passwords + real_passwords
         with open(PASSWORDS_FILE, "w", encoding="utf-8") as f:
@@ -144,7 +144,7 @@ class IdentityAttackEngine:
 
     def run_brute_force(self, target_user, target_password):
         print(f"\n[*] --- BRUTE FORCE TESTİ ({target_user}) ---")
-        test_passwords = self.passwords[:5] + [target_password]
+        test_passwords = self.passwords[:6] + [target_password]
         for password in test_passwords:
             result = self.public_app.acquire_token_by_username_password(
                 username=target_user, password=password,

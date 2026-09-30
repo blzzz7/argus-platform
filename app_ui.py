@@ -4,6 +4,9 @@ import requests
 import time
 import io
 import json
+import os
+import hmac
+import hashlib
 import warnings
 from pathlib import Path
 from datetime import datetime
@@ -142,6 +145,44 @@ def event_matches(series: pd.Series, code) -> pd.Series:
     return series.astype(str).str.contains(str(code), na=False)
 
 
+def ensure_timestamp_column(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    UI-ONLY köməkçi funksiya (backend/session_state-ə TOXUNMUR).
+
+    Göstərilən cədvəldə 'Timestamp' sütununun mövcudluğunu təmin edir və onu
+    ən sol sütuna çıxarır ki, hər hadisənin nə vaxt baş verdiyi ilk baxışda
+    görünsün. Əgər DataFrame-də artıq 'Timestamp' sütunu varsa (məs. Tab 3-dəki
+    bəzi hücum event-ləri artıq onu daxil edir), sadəcə sütun sırası düzəldilir.
+    Yoxdursa, göstərim anının cari vaxtı ("indi göründüyü an") oturdulur.
+
+    QEYD: bu, YALNIZ görüntü üçün bir KOPYA üzərində işləyir — nə
+    `st.session_state['df']`, nə də SQLite-dakı saxlanmış data dəyişdirilmir,
+    beləliklə mövcud data axını/backend məntiqi toxunulmaz qalır.
+    """
+    if df is None or df.empty:
+        return df
+
+    display_df = df.copy()
+
+    if "Timestamp" not in display_df.columns:
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        display_df.insert(0, "Timestamp", now_str)
+    else:
+        # Mövcud Timestamp dəyərlərini oxunaqlı formata (YYYY-MM-DD HH:MM:SS)
+        # çevirməyə çalışırıq; çevrilə bilməyən dəyərlər olduğu kimi saxlanılır.
+        def _fmt(v):
+            try:
+                return pd.to_datetime(v).strftime("%Y-%m-%d %H:%M:%S")
+            except Exception:
+                return v
+
+        display_df["Timestamp"] = display_df["Timestamp"].apply(_fmt)
+        cols_order = ["Timestamp"] + [c for c in display_df.columns if c != "Timestamp"]
+        display_df = display_df[cols_order]
+
+    return display_df
+
+
 # PDF Generation Function
 def generate_pdf_report(df, resolved_users, posture_score):
     buffer = io.BytesIO()
@@ -216,7 +257,12 @@ def generate_pdf_report(df, resolved_users, posture_score):
 
     elements.append(Paragraph("2. Threat Analysis & Remediation Log", h2_style))
 
+    # UI-ONLY DÜZƏLİŞ: PDF-dəki hadisə cədvəlinə də Timestamp sütunu əlavə olunur
+    # (görüntü üçün ensure_timestamp_column() istifadə olunur, mənbə df dəyişmir).
+    pdf_display_df = ensure_timestamp_column(df) if not df.empty else df
+
     table_data = [[
+        Paragraph("<b>Timestamp</b>", body_style),
         Paragraph("<b>Target User</b>", body_style),
         Paragraph("<b>Attacker IP</b>", body_style),
         Paragraph("<b>Error Code</b>", body_style),
@@ -224,8 +270,9 @@ def generate_pdf_report(df, resolved_users, posture_score):
         Paragraph("<b>Remediation Status</b>", body_style)
     ]]
 
-    if not df.empty:
-        for idx, row in df.iterrows():
+    if not pdf_display_df.empty:
+        for idx, row in pdf_display_df.iterrows():
+            ts = str(row.get("Timestamp", ""))
             user = str(row.get(user_col, "Unknown"))
             ip = str(row.get(ip_col, "127.0.0.1"))
             err = str(row.get("ErrorCode", "AADSTS50126"))
@@ -235,6 +282,7 @@ def generate_pdf_report(df, resolved_users, posture_score):
             status_text = "<b><font color='#28A745'>REMEDIATED (Blocked)</font></b>" if is_blocked else "<b><font color='#DC3545'>ACTIVE THREAT</font></b>"
 
             table_data.append([
+                Paragraph(ts, body_style),
                 Paragraph(user, body_style),
                 Paragraph(ip, body_style),
                 Paragraph(err, body_style),
@@ -242,7 +290,7 @@ def generate_pdf_report(df, resolved_users, posture_score):
                 Paragraph(status_text, body_style)
             ])
 
-    threat_table = Table(table_data, colWidths=[110, 100, 90, 100, 140])
+    threat_table = Table(table_data, colWidths=[85, 95, 85, 75, 75, 125])
     threat_table.setStyle(TableStyle([
         ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#1F77B4")),
         ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
@@ -272,6 +320,292 @@ def generate_pdf_report(df, resolved_users, posture_score):
     return buffer
 
 
+# ========================================================================
+# 🔐 AUTHENTICATION LAYER (SOC-standard Login Panel)
+# ------------------------------------------------------------------------
+# Bu bölmə mövcud tab/session_state məntiqinə TOXUNMUR — sadəcə,
+# istifadəçi autentifikasiya olunmayıbsa əsas interfeysin render
+# olunmasının qarşısını alır (st.stop() ilə).
+# ========================================================================
+ARGUS_ADMIN_USER = os.getenv("ARGUS_ADMIN_USER", "")
+ARGUS_ADMIN_HASH = os.getenv("ARGUS_ADMIN_HASH", "")  # SHA-256 hex digest
+
+MAX_LOGIN_ATTEMPTS = 3
+LOCKOUT_SECONDS = 30
+
+
+def _hash_password(password: str) -> str:
+    return hashlib.sha256(password.encode("utf-8")).hexdigest()
+
+
+def _verify_credentials(username: str, password: str) -> bool:
+    """
+    SHA-256 hash müqayisəsi. `hmac.compare_digest` ilə sabit-vaxt (constant-time)
+    müqayisə aparılır ki, timing-attack vasitəsilə şifrə/istifadəçi adı hərf-hərf
+    çıxarıla bilməsin.
+    """
+    if not ARGUS_ADMIN_USER or not ARGUS_ADMIN_HASH:
+        return False
+    entered_hash = _hash_password(password)
+    user_ok = hmac.compare_digest(username.strip().encode("utf-8"), ARGUS_ADMIN_USER.strip().encode("utf-8"))
+    hash_ok = hmac.compare_digest(entered_hash.encode("utf-8"), ARGUS_ADMIN_HASH.strip().encode("utf-8"))
+    return user_ok and hash_ok
+
+
+def _log_login_event(event_type: str, username: str):
+    """
+    UI login hadisəsini Argus-un MÖVCUD log body-sinə (`send_to_wazuh` -> Argus
+    log bridge -> Wazuh manager -> wazuh-alerts-*) yazır. Beləliklə login
+    hadisələri də digər ITDR telemetriyası ilə eyni audit trail-də görünür.
+    """
+    payload = {
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "event_type": event_type,  # UI_LOGIN_SUCCESS / UI_LOGIN_FAILED / UI_LOGIN_LOCKOUT / UI_LOGOUT
+        "user": username or "unknown",
+        "source": "Argus-UI-Auth",
+        "severity": "INFO" if event_type == "UI_LOGIN_SUCCESS" else "HIGH",
+        "rule_title": "Argus ITDR Panel Authentication Event",
+    }
+    try:
+        send_to_wazuh(payload)
+    except Exception:
+        # Audit log göndərilməsi heç vaxt login axınını bloklamamalıdır
+        pass
+
+
+def _init_auth_state():
+    st.session_state.setdefault("authenticated", False)
+    st.session_state.setdefault("auth_username", None)
+    st.session_state.setdefault("login_attempts", 0)
+    st.session_state.setdefault("lockout_until", 0.0)
+
+
+def render_login_page():
+    """Korporativ SOC-tərzli dark-mode login paneli (st.form + rate limiting)."""
+    st.markdown(
+        """
+        <style>
+        .stApp {
+            background: radial-gradient(circle at top, #111827 0%, #05070c 68%);
+        }
+        [data-testid="stForm"] {
+            background: #0e1420;
+            border: 1px solid #1f2937;
+            border-radius: 14px;
+            padding: 2.2rem 2.4rem 1.6rem 2.4rem;
+            box-shadow: 0 0 40px rgba(0, 180, 255, 0.07);
+        }
+        .argus-login-title {
+            font-size: 1.75rem;
+            font-weight: 800;
+            color: #e5e7eb;
+            margin-bottom: 0.15rem;
+        }
+        .argus-login-subtitle {
+            font-size: 0.87rem;
+            color: #7d8aa0;
+            margin-bottom: 1.5rem;
+            line-height: 1.4;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    col_l, col_center, col_r = st.columns([1, 1.15, 1])
+    with col_center:
+        st.markdown('<div class="argus-login-title">🛡️ Argus ITDR Platform Login</div>', unsafe_allow_html=True)
+        st.markdown(
+            '<div class="argus-login-subtitle">Identity Threat Detection &amp; Response — Restricted Access.<br>'
+            'Bütün giriş cəhdləri audit log-a yazılır.</div>',
+            unsafe_allow_html=True,
+        )
+
+        now = time.time()
+        lockout_remaining = st.session_state["lockout_until"] - now
+
+        if lockout_remaining > 0:
+            st.error(
+                f"🔒 Həddindən artıq yanlış cəhd səbəbindən müvəqqəti bloklanıb. "
+                f"Yenidən cəhd etmək üçün **{int(lockout_remaining) + 1} saniyə** gözləyin."
+            )
+            st.button("🔄 Yenilə")
+            return
+
+        if not ARGUS_ADMIN_USER or not ARGUS_ADMIN_HASH:
+            st.warning(
+                "⚠️ `.env` faylında `ARGUS_ADMIN_USER` və/ya `ARGUS_ADMIN_HASH` təyin olunmayıb — "
+                "giriş mümkün deyil. Aşağıdakı dəyişənləri doldurun və tətbiqi yenidən başladın."
+            )
+
+        with st.form("login_form", clear_on_submit=False):
+            username_input = st.text_input("👤 İstifadəçi adı", value="", key="login_username_field")
+            password_input = st.text_input("🔑 Şifrə", value="", type="password", key="login_password_field")
+            submitted = st.form_submit_button("🔓 Daxil ol", use_container_width=True)
+
+            if submitted:
+                if _verify_credentials(username_input, password_input):
+                    st.session_state["authenticated"] = True
+                    st.session_state["auth_username"] = username_input.strip()
+                    st.session_state["login_attempts"] = 0
+                    st.session_state["lockout_until"] = 0.0
+                    _log_login_event("UI_LOGIN_SUCCESS", username_input.strip())
+                    st.rerun()
+                else:
+                    st.session_state["login_attempts"] += 1
+                    _log_login_event("UI_LOGIN_FAILED", username_input.strip() or "unknown")
+
+                    remaining = MAX_LOGIN_ATTEMPTS - st.session_state["login_attempts"]
+                    if remaining <= 0:
+                        st.session_state["lockout_until"] = time.time() + LOCKOUT_SECONDS
+                        st.session_state["login_attempts"] = 0
+                        _log_login_event("UI_LOGIN_LOCKOUT", username_input.strip() or "unknown")
+                        st.error(f"🔒 3 ardıcıl yanlış cəhd aşkarlandı. {LOCKOUT_SECONDS} saniyəlik bloklama aktivləşdi.")
+                        st.rerun()
+                    else:
+                        st.error(f"❌ Yanlış istifadəçi adı və ya şifrə. Qalan cəhd: {remaining}")
+
+        st.caption("🔐 SHA-256 hash-based authentication · Rate-limited · Audit-logged to Argus log bridge")
+
+
+def render_logout_sidebar():
+    with st.sidebar:
+        st.markdown("---")
+        st.markdown(f"👤 **{st.session_state.get('auth_username') or 'Admin'}**")
+        st.caption("🟢 Authenticated Session")
+        if st.button("🚪 Çıxış Et (Logout)", use_container_width=True):
+            _log_login_event("UI_LOGOUT", st.session_state.get("auth_username", "unknown"))
+            st.session_state["authenticated"] = False
+            st.session_state["auth_username"] = None
+            st.rerun()
+
+
+_init_auth_state()
+
+if not st.session_state["authenticated"]:
+    render_login_page()
+    st.stop()
+
+
+# ========================================================================
+# 🎨 SIDEBAR BRANDING + VERTİKAL NAVİQASİYA MENYUSU (YENİ — UI/UX-ONLY)
+# ------------------------------------------------------------------------
+# Aşağıdakı bölmə YALNIZ vizual təqdimatı dəyişir: əvvəlki üfüqi st.tabs()
+# strukturunun yerinə sol Sidebar-da vertikal st.sidebar.radio() menyusu
+# qurulur. Backend məntiqi, session_state strukturu və login axını
+# TOXUNULMAZ qalır — sadəcə məzmun bloklarının "with tabX:" əvəzinə
+# "if selected_menu == ...:" ilə şərtləndirilir.
+# ========================================================================
+st.markdown(
+    """
+    <style>
+    /* Sidebar-ın ümumi SOC-tərzi fon və border rəngi */
+    section[data-testid="stSidebar"] {
+        background: linear-gradient(180deg, #0b0f19 0%, #05070c 100%);
+        border-right: 1px solid #1f2937;
+    }
+
+    .argus-sidebar-brand {
+        padding: 1.1rem 0.9rem 1rem 0.9rem;
+        margin: -1rem -1rem 0.6rem -1rem;
+        background: radial-gradient(circle at top left, rgba(31,119,180,0.18), rgba(5,7,12,0) 70%);
+        border-bottom: 1px solid #1f2937;
+    }
+    .argus-sidebar-brand-title {
+        font-size: 1.35rem;
+        font-weight: 800;
+        color: #e5e7eb;
+        letter-spacing: 0.3px;
+        display: flex;
+        align-items: center;
+        gap: 0.4rem;
+    }
+    .argus-sidebar-brand-subtitle {
+        font-size: 0.74rem;
+        font-weight: 500;
+        color: #7d8aa0;
+        letter-spacing: 0.4px;
+        text-transform: uppercase;
+        margin-top: 0.15rem;
+    }
+    .argus-sidebar-brand-badge {
+        display: inline-block;
+        margin-top: 0.55rem;
+        padding: 0.18rem 0.55rem;
+        font-size: 0.68rem;
+        font-weight: 700;
+        letter-spacing: 0.5px;
+        color: #34d399;
+        background: rgba(52, 211, 153, 0.12);
+        border: 1px solid rgba(52, 211, 153, 0.35);
+        border-radius: 999px;
+    }
+
+    .argus-sidebar-menu-label {
+        font-size: 0.7rem;
+        font-weight: 700;
+        letter-spacing: 1.2px;
+        color: #5b6579;
+        margin: 0.4rem 0 0.3rem 0.1rem;
+        text-transform: uppercase;
+    }
+
+    /* Radio-nu SOC-tərzi vertikal menyu kimi stilizə et */
+    section[data-testid="stSidebar"] div[role="radiogroup"] {
+        gap: 0.15rem;
+    }
+    section[data-testid="stSidebar"] div[role="radiogroup"] label {
+        padding: 0.5rem 0.6rem;
+        border-radius: 8px;
+        width: 100%;
+        transition: background-color 0.15s ease;
+    }
+    section[data-testid="stSidebar"] div[role="radiogroup"] label:hover {
+        background-color: rgba(31, 119, 180, 0.12);
+    }
+    section[data-testid="stSidebar"] div[role="radiogroup"] label p {
+        color: #cbd5e1 !important;
+        font-size: 0.92rem !important;
+        font-weight: 500;
+    }
+    </style>
+
+    <div class="argus-sidebar-brand">
+        <div class="argus-sidebar-brand-title">🛡️ Argus ITDR</div>
+        <div class="argus-sidebar-brand-subtitle">Identity Threat Detection and Response</div>
+        <div class="argus-sidebar-brand-badge">● SOC ACTIVE</div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+MENU_OPTIONS = [
+    "📥 Live Log Ingestion",
+    "🤖 AI Threat Analysis & Auto-Fix",
+    "⚔️ Red Team Attack Controller",
+    "🛡️ Blue Team & ITDR Dashboard",
+    "📊 Interactive Analytics",
+    "🎯 Threat Detection Engine",
+    "⚙️ SIEM Integration Test",
+    "📄 Security Audit Report",
+]
+
+st.sidebar.markdown('<div class="argus-sidebar-menu-label">NAVIGATION</div>', unsafe_allow_html=True)
+selected_menu = st.sidebar.radio(
+    "Naviqasiya",
+    MENU_OPTIONS,
+    label_visibility="collapsed",
+    key="argus_nav_menu",
+)
+
+# Login/logout bloku (mövcud, dəyişməz) — brend + menyudan sonra, sidebar-ın
+# alt hissəsində görünür.
+render_logout_sidebar()
+# ========================================================================
+# 🔐 END AUTHENTICATION LAYER / END SIDEBAR NAVIGATION
+# ========================================================================
+
+
 # ----------------------------------------------------------------------
 # Session state initialization — İNDİ SQLite-dan yüklənir (persistence)
 # ----------------------------------------------------------------------
@@ -287,19 +621,8 @@ if 'resolved_users' not in st.session_state:
 st.title("🛡️ Argus ITDR - Identity Threat Detection & Response")
 st.caption("Real-time Identity Log Analysis, Dynamic Risk Scoring, Analytics & SIEM Integration")
 
-tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
-    "📥 Live Log Ingestion",
-    "🤖 AI Threat Analysis & Auto-Fix",
-    "⚔️ Red Team Attack Controller",
-    "🛡️ Blue Team & ITDR Dashboard",
-    "📊 Interactive Analytics",
-    "🎯 Threat Detection Engine",
-    "⚙️ SIEM Integration Test",
-    "📄 Security Audit Report"
-])
-
 # TAB 1: Live Log Ingestion
-with tab1:
+if selected_menu == "📥 Live Log Ingestion":
     st.header("Active Directory & Identity Logs")
 
     col_upload, col_reset = st.columns([4, 1])
@@ -343,7 +666,7 @@ with tab1:
         st.session_state['df'] = df
         storage.append_events(df)
         st.subheader("Raw Identity Events")
-        st.dataframe(df, use_container_width=True)
+        st.dataframe(ensure_timestamp_column(df), use_container_width=True)
     else:
         if not st.session_state['df'].empty:
             st.subheader("Current Telemetry Logs in Memory")
@@ -353,12 +676,12 @@ with tab1:
                 live_df = live_df.sort_values('Timestamp', ascending=False)
             else:
                 live_df = live_df.iloc[::-1]
-            st.dataframe(live_df, use_container_width=True)
+            st.dataframe(ensure_timestamp_column(live_df), use_container_width=True)
         else:
             st.info("Upload identity telemetry CSV logs or use the Red Team Attack Controller to generate live attack logs.")
 
 # TAB 2: AI Threat Analysis & Auto-Fix
-with tab2:
+elif selected_menu == "🤖 AI Threat Analysis & Auto-Fix":
     st.header("🤖 AI Threat Analysis & Remediation")
 
     if not config.ENABLE_REAL_REMEDIATION:
@@ -439,6 +762,7 @@ with tab2:
                 auth_method = row.get("AuthMethod", "OAuth2/NTLM")
                 err_code = row.get("ErrorCode", "AADSTS50126")
                 risk_level = row.get('_risk_level', 'ATTEMPTED')
+                ts_display = row.get("Timestamp", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
 
                 is_resolved = user in st.session_state['resolved_users']
 
@@ -446,7 +770,7 @@ with tab2:
                 event_label = "4624 (SUCCESS)" if risk_level == 'COMPROMISED' else "4625 (FAILED)"
 
                 with st.expander(
-                    f"{label_icon} **Target User:** {user} | **Event ID:** {event_label} | **Error:** {err_code} | **IP:** {ip}",
+                    f"{label_icon} **[{ts_display}] Target User:** {user} | **Event ID:** {event_label} | **Error:** {err_code} | **IP:** {ip}",
                     expanded=not is_resolved
                 ):
                     if is_resolved:
@@ -526,8 +850,9 @@ with tab2:
                                     st.error(f"❌ AI Generator xətası: {e}")
     else:
         st.warning("⚠️ No logs ingested or generated yet. Upload CSV or run Red Team Attack Simulation.")
+
 # TAB 3: Red Team Attack Controller & Simulation Engine
-with tab3:
+elif selected_menu == "⚔️ Red Team Attack Controller":
     st.header("⚔️ Red Team Attack Controller & Simulation Engine")
     st.caption("Execute MSAL authentication attacks against your own Microsoft Entra ID test tenant.")
 
@@ -555,6 +880,12 @@ with tab3:
         default_domain = config.DOMAIN or "example.onmicrosoft.com"
         target_user_input = st.text_input("Target User (for Brute Force / MFA)", value=f"user2@{default_domain}")
         spray_password_input = st.text_input("Spray Password", value="")
+        custom_brute_password = st.text_input(
+            "🎯 Custom Brute Force Password (optional)",
+            value="",
+            help="Buraya yazdığınız şifrə, standart wordlist-ə ƏLAVƏ olaraq "
+                 "(və ilk sırada) brute force siyahısına daxil edilir."
+        )
         max_targets_count = st.slider("Max Target Limit", min_value=1, max_value=50, value=18)
 
         st.markdown("---")
@@ -638,7 +969,18 @@ with tab3:
             console_logs.append(f"[*] Executing Brute Force against {target_user_input}...\n")
             terminal_placeholder.code("\n".join(console_logs), language="bash")
 
-            test_passwords = attack_engine.passwords[:5]
+            # Öz şifrəniz varsa, siyahının ƏVVƏLİNƏ əlavə olunur ki, ilk cəhddə
+            # sınanılsın (wordlist-dən 5-i ilə birlikdə dublikat yaranmaması üçün süzülür).
+            wordlist_sample = attack_engine.passwords[:5]
+            if custom_brute_password:
+                test_passwords = [custom_brute_password] + [
+                    p for p in wordlist_sample if p != custom_brute_password
+                ]
+                console_logs.append(f"[*] Xüsusi şifrə siyahının əvvəlinə əlavə olundu: '{custom_brute_password}'")
+                terminal_placeholder.code("\n".join(console_logs), language="bash")
+            else:
+                test_passwords = wordlist_sample
+
             for pwd in test_passwords:
                 result = attack_engine.public_app.acquire_token_by_username_password(
                     username=target_user_input, password=pwd, scopes=["https://graph.microsoft.com/.default"]
@@ -740,10 +1082,10 @@ with tab3:
             st.success("Attack execution completed.")
 
 # TAB 4: Blue Team & ITDR Dashboard
-with tab4:
+elif selected_menu == "🛡️ Blue Team & ITDR Dashboard":
     st.header("🛡️ Blue Team & ITDR Monitoring Dashboard")
     st.caption("📜 **All-Time History** — bu dashboard bütün əvvəlki hücum run-larının məlumatını (SQLite-da persist olunmuş) birlikdə göstərir, "
-               "təkcə son run-u deyil. Yalnız indiki run-a baxmaq üçün Tab 1 və Tab 2-yə keçin (ən yeni yuxarıda sıralanır).")
+               "təkcə son run-u deyil. Yalnız indiki run-a baxmaq üçün Live Log Ingestion və AI Threat Analysis menyularına keçin (ən yeni yuxarıda sıralanır).")
 
     if 'df' in st.session_state and not st.session_state['df'].empty:
         df = st.session_state['df']
@@ -805,6 +1147,7 @@ with tab4:
                 user = row.get(user_col, "Unknown") if user_col else "Unknown"
                 ip = row.get(ip_col, "127.0.0.1") if ip_col else "127.0.0.1"
                 err_code = row.get("ErrorCode", "AADSTS50126")
+                ts_display = row.get("Timestamp", "")
 
                 # DÜZƏLİŞ (kök səbəb): əvvəlki `event_id == 4624` bərabərlik müqayisəsi
                 # EventID sütununun tipi (str vs int) mənbəyə görə dəyişəndə səssizcə
@@ -826,16 +1169,18 @@ with tab4:
                 if severity_filter != "ALL" and sev != severity_filter:
                     continue
 
+                ts_prefix = f"`[{ts_display}]` " if ts_display else ""
+
                 if sev == "CRITICAL" and risk == "COMPROMISED":
-                    st.error(f"🔴 **[CRITICAL]** Successful Attacker Logon (`4624`) — Account COMPROMISED: `{user}` from `{ip}`")
+                    st.error(f"🔴 **[CRITICAL]** {ts_prefix}Successful Attacker Logon (`4624`) — Account COMPROMISED: `{user}` from `{ip}`")
                 elif sev == "CRITICAL":
-                    st.error(f"🔴 **[CRITICAL]** Account Lockout / Brute Force on `{user}` from `{ip}` | Error: `{err_code}`")
+                    st.error(f"🔴 **[CRITICAL]** {ts_prefix}Account Lockout / Brute Force on `{user}` from `{ip}` | Error: `{err_code}`")
                 elif sev == "HIGH":
-                    st.warning(f"🟠 **[HIGH]** Failed Authentication (`4625`) on `{user}` from `{ip}` | Error: `{err_code}`")
+                    st.warning(f"🟠 **[HIGH]** {ts_prefix}Failed Authentication (`4625`) on `{user}` from `{ip}` | Error: `{err_code}`")
                 elif sev == "MEDIUM":
-                    st.info(f"🟡 **[MEDIUM]** User Enumeration (`4625`) on `{user}` from `{ip}` | Error: `{err_code}`")
+                    st.info(f"🟡 **[MEDIUM]** {ts_prefix}User Enumeration (`4625`) on `{user}` from `{ip}` | Error: `{err_code}`")
                 else:
-                    st.info(f"🟢 **[LOW]** Informational event for `{user}` from `{ip}`")
+                    st.info(f"🟢 **[LOW]** {ts_prefix}Informational event for `{user}` from `{ip}`")
 
         with col_logs:
             st.subheader("📋 Entra ID Sign-in Logs Table")
@@ -847,12 +1192,12 @@ with tab4:
                     '_risk', key=lambda s: s.map({'COMPROMISED': 0, 'ATTEMPTED': 1}).fillna(2),
                     kind='mergesort'
                 ).drop(columns=['_risk'])
-            st.dataframe(display_df, use_container_width=True)
+            st.dataframe(ensure_timestamp_column(display_df), use_container_width=True)
     else:
-        st.warning("⚠️ No telemetry feed available. Ingest logs in Tab 1 or trigger Red Team simulation in Tab 3.")
+        st.warning("⚠️ No telemetry feed available. Ingest logs in Live Log Ingestion or trigger Red Team simulation in Red Team Attack Controller.")
 
 # TAB 5: Interactive Analytics
-with tab5:
+elif selected_menu == "📊 Interactive Analytics":
     st.header("📊 Interactive Analytics & Threat Visualizations")
 
     if 'df' in st.session_state and not st.session_state['df'].empty:
@@ -910,11 +1255,14 @@ with tab5:
         st.warning("⚠️ No data available for visualization.")
 
 # TAB 6: Threat Detection Engine
-with tab6:
+elif selected_menu == "🎯 Threat Detection Engine":
     st.header("Threat Detection Engine")
     if 'df' in st.session_state and not st.session_state['df'].empty:
         df = st.session_state['df']
         st.warning("⚠️ High Risk Identity Threats Detected!")
+
+        st.subheader("📋 Pending Telemetry (Dispatch Preview)")
+        st.dataframe(ensure_timestamp_column(df), use_container_width=True)
 
         if st.button("🚨 Dispatch All Threats to Wazuh SIEM"):
             success_count = 0
@@ -945,7 +1293,7 @@ with tab6:
         st.info("No threats to dispatch.")
 
 # TAB 7: SIEM Integration Test
-with tab7:
+elif selected_menu == "⚙️ SIEM Integration Test":
     st.header("Manual Telemetry Injection")
     col1, col2 = st.columns(2)
     with col1:
@@ -969,7 +1317,7 @@ with tab7:
             st.error(f"❌ Failed: {res}")
 
 # TAB 8: Security Audit Report Generator
-with tab8:
+elif selected_menu == "📄 Security Audit Report":
     st.header("📄 Automated PDF Security Audit Report Generator")
     st.caption("Generate an official, executive-ready PDF Audit Report containing attack telemetry, risk scoring, and remediation history.")
 
@@ -996,6 +1344,10 @@ with tab8:
             st.error(f"**Compromised Accounts:** {compromised_attempts}")
         with c4:
             st.success(f"**Remediated Accounts:** {len(resolved_users)}")
+
+        st.markdown("---")
+        st.subheader("🗂️ Included Telemetry Preview (with Timestamp)")
+        st.dataframe(ensure_timestamp_column(df), use_container_width=True)
 
         st.markdown("---")
         st.subheader("📥 Export Audit Report")
