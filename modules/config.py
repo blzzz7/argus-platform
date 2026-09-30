@@ -5,7 +5,13 @@ Mərkəzləşdirilmiş konfiqurasiya modulu.
 
 QAYDA: Bu faylda HEÇ VAXT real şifrə, client secret və ya token saxlanmır.
 Bütün sirlər `.env` faylından (lokal inkişaf üçün) və ya real mühit
-dəyişənlərindən (production/deploy üçün) oxunur.
+dəyişənlərindən (production/deploy üçün, o cümlədən Streamlit Community
+Cloud-un Secrets bölməsindən) oxunur.
+
+QEYD (Streamlit Cloud): Cloud-un `secrets.toml`-unda TOP-LEVEL (nested
+OLMAYAN) açarlar avtomatik OS environment variable kimi də expose olunur,
+ona görə aşağıdakı `os.getenv()` əsaslı yanaşma əlavə körpü olmadan həm
+lokalda, həm Cloud-da eyni cür işləyir.
 
 İstifadədən əvvəl `.env.example` faylını `.env` adı ilə köçürüb doldurun:
     cp .env.example .env
@@ -25,7 +31,7 @@ def _get(name: str, default: str = None, required: bool = False) -> str:
     if required and not val:
         raise RuntimeError(
             f"Tələb olunan mühit dəyişəni tapılmadı: '{name}'. "
-            f".env faylını yoxlayın və ya export {name}=... edin."
+            f".env faylını (yaxud Streamlit Cloud Secrets-i) yoxlayın."
         )
     return val
 
@@ -64,11 +70,20 @@ WAZUH_VERIFY_SSL = _get("WAZUH_VERIFY_SSL", "true").strip().lower() == "true"
 WAZUH_ALERTS_INDEX = _get("WAZUH_ALERTS_INDEX", "wazuh-alerts-*")
 
 # ----------------------------------------------------------------------
-# Argus -> Wazuh manager lokal fayl körpüsü (YENİ)
+# Argus -> Wazuh manager lokal fayl körpüsü
 # ----------------------------------------------------------------------
 # send_to_wazuh() hadisələri bu qovluqdakı NDJSON fayla yazır. Bu qovluq
 # docker-compose.yml-də wazuh.manager konteynerinin /var/log/argus
 # qovluğuna bind-mount edilməlidir (bax: WAZUH_SETUP.md).
+#
+# DİQQƏT (Cloud portativlik qeydi): aşağıdakı default dəyər sizin öz Windows
+# kompüterinizə (`C:\\Users\\rkazi\\...`) sabitlənib. Bu lokal inkişaf üçün
+# problemsizdir, AMMA Streamlit Community Cloud-da (Linux mühiti) bu yol
+# mövcud olmayacaq və fayla yazma cəhdi xəta verəcək. Cloud-a deploy edərkən
+# Secrets-də `ARGUS_LOG_DIR` üçün Linux-uyğun bir yol təyin edin
+# (məs. "/tmp/argus-logs" — Cloud-da Wazuh manager-in özü işləmədiyi üçün
+# bu, sadəcə yazma xətası almamaq məqsədi daşıyır; real Wazuh inteqrasiyası
+# yalnız Wazuh manager-in əlçatan olduğu mühitdə mənalıdır).
 ARGUS_LOG_DIR = _get("ARGUS_LOG_DIR", r"C:\Users\rkazi\wazuh-docker\single-node\argus-logs")
 ARGUS_LOG_FILENAME = _get("ARGUS_LOG_FILENAME", "itdr-events.json")
 
@@ -81,6 +96,18 @@ CLIENT_SECRET = _get("ARGUS_CLIENT_SECRET")
 DOMAIN = _get("ARGUS_DOMAIN", "")
 
 AUTHORITY = f"https://login.microsoftonline.com/{TENANT_ID}" if TENANT_ID else None
+
+# YENİ: Cloud-da test istifadəçi/şifrə cütlüklərini TƏHLÜKƏSİZ şəkildə saxlamaq
+# üçün (bax: modules/attack_engine.py -> _load_test_identities()). Streamlit
+# Cloud secrets.toml-da çox sətirli string kimi verilə bilər:
+#
+#   ARGUS_TEST_IDENTITIES_JSON = """
+#   {"domain": "yourtenant.onmicrosoft.com",
+#    "credentials": {"victimuser@yourtenant.onmicrosoft.com": "RealTestPass123!"}}
+#   """
+#
+# Boşdursa, attack_engine.py lokal data/test_identities.json faylına enir.
+TEST_IDENTITIES_JSON = _get("ARGUS_TEST_IDENTITIES_JSON", "")
 
 # ----------------------------------------------------------------------
 # Feature Flags

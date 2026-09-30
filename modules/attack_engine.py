@@ -6,15 +6,27 @@ kirayəçinizə (tenant) qarşı, açıq razılıqla istifadə edilməlidir.
 Başqa təşkilatın kirayəçisinə qarşı istifadəsi qanunsuzdur və
 Microsoft-un İstifadə Şərtlərini pozur.
 
-DƏYİŞİKLİKLƏR (əvvəlki versiya ilə müqayisədə):
-1. TENANT_ID / CLIENT_ID / CLIENT_SECRET və real istifadəçi şifrələri artıq
-    mənbə kodunda YOXDUR — hamısı `.env` və `data/test_identities.json`
-    fayllarından oxunur (bax: config.py, .env.example).
-2. `IdentityAttackEngine.__init__` credential-lar yoxdursa aydın xəta verir
-    (əvvəlki versiyada bu, `app.py`-da idarə olunmayan crash-ə səbəb olurdu).
-3. Real Blue-Team remediation üçün iki yeni metod əlavə olunub:
-    `revoke_sign_in_sessions()` və `disable_account()` — Microsoft Graph
-    app-only (client credentials) axını ilə HƏQİQİ əməliyyat aparır.
+DƏYİŞİKLİKLƏR (bu versiya — Cloud/Graph fix):
+1. KÖK SƏBƏB DÜZƏLİŞİ: əvvəlki versiya istifadəçi siyahısını YALNIZ lokal
+   `data/test_identities.json` faylından oxuyurdu. Bu fayl (düzgün olaraq)
+   .gitignore-dadır və Streamlit Cloud-a deploy olunmur, ona görə Cloud-da
+   avtomatik yaradılan boş nümunə fayl (tək bir placeholder user ilə) işə
+   düşürdü və hücumlar saxta `fake_user_*` adlarına qarşı gedib AADSTS50034
+   ilə uğursuz olurdu.
+2. YENİ: `fetch_tenant_users_from_graph()` — artıq admin-consent verilmiş
+   `User.Read.All` / `Directory.Read.All` Application icazələri ilə
+   Microsoft Graph-dan HƏQİQİ tenant istifadəçilərini (UPN-ləri) çəkir.
+   Bu, həm lokalda, həm Cloud-da EYNİ şəkildə işləyir, çünki heç bir yerli
+   fayla ehtiyac duymur — yalnız `.env`/Cloud secrets-dəki
+   TENANT_ID/CLIENT_ID/CLIENT_SECRET-ə əsaslanır.
+3. YENİ: `_load_test_identities()` indi əvvəlcə `config.TEST_IDENTITIES_JSON`
+   (Cloud secrets-də saxlanan JSON mətni) yoxlayır, sonra lokal fayla enir.
+   Bu, "bilinən doğru şifrə" demo ssenarilərini TƏHLÜKƏSİZ şəkildə Cloud-a
+   köçürməyə imkan verir (real şifrə heç vaxt git-ə commit olunmur).
+4. Wordlist-lər artıq hər tətbiq başlanğıcında YENİDƏN generasiya olunur
+   (əvvəlki versiya `if not os.path.exists(...)` ilə YALNIZ bir dəfə
+   yazırdı — kод düzəldilsə belə köhnə fayl qalırdısa dəyişiklik heç vaxt
+   görünməzdi).
 """
 import os
 import json
@@ -30,18 +42,35 @@ PASSWORDS_FILE = "passwords_wordlist.txt"
 _DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "data")
 TEST_IDENTITIES_FILE = os.path.join(_DATA_DIR, "test_identities.json")
 
+GRAPH_USERS_ENDPOINT = "https://graph.microsoft.com/v1.0/users"
+
 
 def _load_test_identities() -> dict:
     """
-    Test istifadəçi/şifrə cütlüklərini xarici JSON fayldan oxuyur.
-    Fayl mövcud deyilsə, nümunə şablon yaradır (REAL şifrə YAZMIR) və
-    bunu `.gitignore`-a əlavə etməyi xatırladır.
+    Test istifadəçi/şifrə cütlüklərini yükləyir. Prioritet sırası:
+
+      1. `config.TEST_IDENTITIES_JSON` — Cloud secrets-də (və ya .env-də)
+         saxlanan tam JSON mətni (məs. Streamlit Cloud secrets.toml-da
+         çox sətirli string kimi). Bu, real şifrələri git-ə commit etmədən
+         Cloud-a təhlükəsiz köçürməyə imkan verir.
+      2. Lokal `data/test_identities.json` faylı (yalnız lokal inkişaf üçün,
+         .gitignore-da qalmalıdır).
+      3. Heç biri yoxdursa, nümunə şablon yaradılır (REAL şifrə YAZMIR).
     """
+    if config.TEST_IDENTITIES_JSON:
+        try:
+            data = json.loads(config.TEST_IDENTITIES_JSON)
+            data["_source"] = "secrets (ARGUS_TEST_IDENTITIES_JSON)"
+            return data
+        except json.JSONDecodeError as e:
+            print(f"[!] ARGUS_TEST_IDENTITIES_JSON parse xətası, lokal fayla keçilir: {e}")
+
     if not os.path.exists(TEST_IDENTITIES_FILE):
         os.makedirs(_DATA_DIR, exist_ok=True)
         sample = {
             "_warning": "Bu fayl real test istifadəçi məlumatlarınızı saxlayır. "
                         "Mütləq .gitignore-a əlavə edin, ictimai repoya push etməyin!",
+            "_source": "local file (auto-generated placeholder)",
             "domain": config.DOMAIN or "example.onmicrosoft.com",
             "credentials": {
                 "victimuser@example.onmicrosoft.com": "REPLACE_ME_ChangeThisPassword!"
@@ -52,34 +81,139 @@ def _load_test_identities() -> dict:
         return sample
 
     with open(TEST_IDENTITIES_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
+        data = json.load(f)
+        data.setdefault("_source", "local file (data/test_identities.json)")
+        return data
 
 
 _identities = _load_test_identities()
 DOMAIN = config.DOMAIN or _identities.get("domain", "example.onmicrosoft.com")
 REAL_CREDENTIALS = dict(_identities.get("credentials", {}))
+IDENTITIES_SOURCE = _identities.get("_source", "unknown")
 
 
-def generate_wordlists():
-    if not os.path.exists(USERS_FILE):
+def fetch_tenant_users_from_graph(max_users: int = 200):
+    """
+    Microsoft Graph-dan (app-only, client credentials) HƏQİQİ tenant
+    istifadəçilərinin userPrincipalName siyahısını çəkir.
+
+    Tələb olunan Application (app-only) icazələri (admin consent ilə):
+        - User.Read.All   VƏ YA
+        - Directory.Read.All
+
+    Qaytarır: (ok: bool, data: list[str] | str-xəta-mesajı)
+
+    QEYD: Bu, YALNIZ istifadəçilərin MÖVCUDLUĞUNU (kimin hesabı var) həll edir.
+    Şifrələri Graph API heç vaxt qaytarmır (mümkün deyil) — brute-force/spray
+    demo ssenariləri üçün bilinən "doğru" şifrə hələ də `REAL_CREDENTIALS`-dan
+    (yəni Cloud secrets və ya lokal test_identities.json-dan) gəlməlidir.
+    """
+    if not config.has_graph_credentials():
+        return False, "ARGUS_TENANT_ID/CLIENT_ID/CLIENT_SECRET tapılmadı."
+
+    try:
+        cca = msal.ConfidentialClientApplication(
+            config.CLIENT_ID,
+            authority=config.AUTHORITY,
+            client_credential=config.CLIENT_SECRET,
+        )
+        token_result = cca.acquire_token_for_client(scopes=["https://graph.microsoft.com/.default"])
+        access_token = token_result.get("access_token")
+        if not access_token:
+            err = token_result.get("error_description", token_result.get("error", "naməlum"))
+            return False, f"App-only token əldə edilmədi: {err}"
+    except Exception as e:
+        return False, f"MSAL token xətası: {e}"
+
+    headers = {"Authorization": f"Bearer {access_token}"}
+    url = f"{GRAPH_USERS_ENDPOINT}?$select=userPrincipalName,accountEnabled&$top=999"
+    users = []
+
+    try:
+        while url and len(users) < max_users:
+            resp = requests.get(url, headers=headers, timeout=15)
+            if resp.status_code != 200:
+                # Ən çox rastlanan hal: admin consent hələ təsdiqlənməyib (403),
+                # ya da icazə tipi Delegated seçilib, Application yox.
+                return False, f"Graph HTTP {resp.status_code}: {resp.text[:300]}"
+
+            body = resp.json()
+            for u in body.get("value", []):
+                upn = u.get("userPrincipalName")
+                if upn and u.get("accountEnabled", True):
+                    users.append(upn)
+
+            url = body.get("@odata.nextLink")  # pagination
+
+        return True, users[:max_users]
+    except Exception as e:
+        return False, f"Graph sorğu xətası: {e}"
+
+
+def generate_wordlists(force_refresh: bool = True):
+    """
+    BUG FIX: əvvəllər `if not os.path.exists(...)` şərti ilə yalnız BİR DƏFƏ
+    yazılırdı — kod düzəldilsə belə, köhnə fayl mövcud qalırsa dəyişiklik heç
+    vaxt tətbiq olunmurdu. İndi default olaraq `force_refresh=True` ilə hər
+    tətbiq başlanğıcında YENİDƏN generasiya olunur (bu, sadə mətn faylları
+    üçün ucuz əməliyyatdır, performans problemi yaratmır).
+
+    İstifadəçi siyahısı üçün prioritet:
+        1. Microsoft Graph-dan canlı çəkilən HƏQİQİ tenant istifadəçiləri
+           (fetch_tenant_users_from_graph()) — həm lokal, həm Cloud-da eyni
+           işləyir, çünki heç bir yerli fayla bağlı deyil.
+        2. Graph sorğusu uğursuz olarsa (icazə yoxdur/şəbəkə problemi),
+           REAL_CREDENTIALS-dakı (secrets və ya lokal fayl) bilinən
+           istifadəçilərə enilir.
+    Hər iki halda nəticəyə bir neçə aydın "fake_*" adı əlavə olunur ki,
+    enumeration/negative-test ssenariləri də sınana bilsin.
+    """
+    graph_ok, graph_result = fetch_tenant_users_from_graph()
+
+    if graph_ok and graph_result:
+        real_users = graph_result
+        user_source = "Microsoft Graph (canlı tenant sorğusu)"
+    else:
         real_users = list(REAL_CREDENTIALS.keys())
-        fake_users = [f"fake_user_{i}@{DOMAIN}" for i in range(1, 100)] + \
-                    [f"corp_admin_{i}@{DOMAIN}" for i in range(1, 50)]
-        all_users = real_users + fake_users
-        with open(USERS_FILE, "w", encoding="utf-8") as f:
-            for u in all_users:
-                f.write(f"{u}\n")
+        user_source = f"local fallback ({IDENTITIES_SOURCE}) — Graph fetch uğursuz oldu: {graph_result if not graph_ok else 'boş nəticə'}"
 
-    if not os.path.exists(PASSWORDS_FILE):
+    # Bilinən şifrəli istifadəçilər (REAL_CREDENTIALS) həmişə siyahıya daxil
+    # edilir ki, brute-force demo hədəfi itməsin, hətta Graph fetch uğurlu olsa da.
+    for known_user in REAL_CREDENTIALS.keys():
+        if known_user not in real_users:
+            real_users.append(known_user)
+
+    fake_users = [f"fake_user_{i}@{DOMAIN}" for i in range(1, 100)] + \
+                 [f"corp_admin_{i}@{DOMAIN}" for i in range(1, 50)]
+    all_users = real_users + fake_users
+
+    all_passwords = None
+    if force_refresh or not os.path.exists(PASSWORDS_FILE):
         real_passwords = list(REAL_CREDENTIALS.values())
         common_passwords = [
             "Password123!", "Admin2026!", "Welcome123!", "Spring2026!",
             "Security123!Entra", "Corporate2026!", "ChangeMe123!", "Company123!"
         ]
         all_passwords = common_passwords + real_passwords
+
+    if force_refresh or not os.path.exists(USERS_FILE):
+        with open(USERS_FILE, "w", encoding="utf-8") as f:
+            for u in all_users:
+                f.write(f"{u}\n")
+
+    if all_passwords is not None:
         with open(PASSWORDS_FILE, "w", encoding="utf-8") as f:
             for p in all_passwords:
                 f.write(f"{p}\n")
+
+    # Diaqnoz üçün UI-a ötürülə bilsin deyə qaytarırıq — səssiz fallback yoxdur.
+    return {
+        "user_source": user_source,
+        "real_user_count": len(real_users),
+        "fake_user_count": len(fake_users),
+        "graph_fetch_ok": graph_ok,
+        "graph_fetch_detail": graph_result if not graph_ok else f"{len(graph_result)} istifadəçi tapıldı",
+    }
 
 
 def load_list_from_file(filepath):
@@ -96,7 +230,7 @@ class IdentityAttackEngine:
         if not config.has_graph_credentials():
             raise RuntimeError(
                 "ARGUS_TENANT_ID / ARGUS_CLIENT_ID / ARGUS_CLIENT_SECRET tapılmadı. "
-                ".env faylını doldurun (bax: .env.example)."
+                ".env faylını (yaxud Streamlit Cloud Secrets-i) doldurun."
             )
         self.public_app = msal.PublicClientApplication(
             config.CLIENT_ID, authority=config.AUTHORITY
@@ -192,7 +326,7 @@ class IdentityAttackEngine:
             print(f"[+] Məlumat Əldə Edildi: {user_data.get('displayName')} ({user_data.get('userPrincipalName')})")
 
     # ------------------------------------------------------------------
-    # BLUE TEAM — YENİ: Real remediation (Microsoft Graph app-only)
+    # BLUE TEAM — Real remediation (Microsoft Graph app-only)
     # ------------------------------------------------------------------
     def get_admin_graph_token(self):
         """
@@ -248,7 +382,10 @@ class IdentityAttackEngine:
 
 if __name__ == "__main__":
     # Yalnız birbaşa `python modules/attack_engine.py` ilə işə salındıqda test axını.
-    generate_wordlists()
+    info = generate_wordlists()
+    print(f"[*] İstifadəçi mənbəyi: {info['user_source']}")
+    print(f"[*] Real: {info['real_user_count']} | Fake: {info['fake_user_count']}")
+
     engine = IdentityAttackEngine(USERS_FILE, PASSWORDS_FILE)
 
     engine.run_user_enumeration(max_targets=18)

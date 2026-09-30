@@ -24,10 +24,16 @@ from modules.ai_generator import AIServiceSwitcher, row_to_entra_log
 # --- ATTACK ENGINE İNTEQRASİYASI ---
 attack_engine = None
 attack_engine_error = None
+wordlist_info = None
 try:
     from modules.attack_engine import IdentityAttackEngine, USERS_FILE, PASSWORDS_FILE, generate_wordlists
 
-    generate_wordlists()
+    # DƏYİŞİKLİK: generate_wordlists() artıq bir dict qaytarır
+    # (user_source, real_user_count, fake_user_count, graph_fetch_ok,
+    # graph_fetch_detail) — bunu Tab 3-də göstəririk ki, istifadəçi
+    # siyahısının HARADAN gəldiyi (Graph vs lokal fallback) heç vaxt
+    # sükutla qalmasın.
+    wordlist_info = generate_wordlists()
     attack_engine = IdentityAttackEngine(USERS_FILE, PASSWORDS_FILE)
 except ImportError as e:
     attack_engine_error = f"Modul import xətası: {e}"
@@ -863,6 +869,21 @@ elif selected_menu == "⚔️ Red Team Attack Controller":
             "`.env` faylında `ARGUS_TENANT_ID`, `ARGUS_CLIENT_ID`, `ARGUS_CLIENT_SECRET` "
             "dəyərlərini doldurduğunuzdan əmin olun."
         )
+
+    # YENİ: istifadəçi siyahısının HARADAN gəldiyi (Microsoft Graph canlı
+    # sorğusu, yoxsa lokal/secrets fallback) artıq UI-da açıq göstərilir —
+    # "niyə saxta userlərə hücum edir" sualı bir daha sükutla qalmasın.
+    if wordlist_info:
+        if wordlist_info["graph_fetch_ok"]:
+            st.success(
+                f"📡 İstifadəçi mənbəyi: **Microsoft Graph (canlı)** — "
+                f"{wordlist_info['real_user_count']} real istifadəçi tapıldı."
+            )
+        else:
+            st.warning(
+                f"⚠️ İstifadəçi mənbəyi: **{wordlist_info['user_source']}**. "
+                f"Graph sorğusu uğursuz oldu: {wordlist_info['graph_fetch_detail']}"
+            )
 
     # DƏYİŞİKLİK: əvvəllər burada "WAZUH_PASSWORD boşdursa heç nə göndərilməyəcək"
     # xəbərdarlığı var idi — bu artıq YANLIŞ, çünki send_to_wazuh() indi WAZUH_PASSWORD-dən
