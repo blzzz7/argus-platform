@@ -28,23 +28,16 @@ wordlist_info = None
 try:
     from modules.attack_engine import IdentityAttackEngine, USERS_FILE, PASSWORDS_FILE, generate_wordlists
 
-    # DƏYİŞİKLİK: generate_wordlists() artıq bir dict qaytarır
-    # (user_source, real_user_count, fake_user_count, graph_fetch_ok,
-    # graph_fetch_detail) — bunu Tab 3-də göstəririk ki, istifadəçi
-    # siyahısının HARADAN gəldiyi (Graph vs lokal fallback) heç vaxt
-    # sükutla qalmasın.
     wordlist_info = generate_wordlists()
     attack_engine = IdentityAttackEngine(USERS_FILE, PASSWORDS_FILE)
 except ImportError as e:
     attack_engine_error = f"Modul import xətası: {e}"
 except RuntimeError as e:
-    # Ən çox rastlanan hal: .env-də ARGUS_TENANT_ID / CLIENT_ID / CLIENT_SECRET yoxdur
     attack_engine_error = str(e)
 except Exception as e:
     attack_engine_error = f"Gözlənilməz xəta: {e}"
 # --------------------------------------------------------
 
-# Streamlit Page Config
 st.set_page_config(
     page_title="Argus ITDR - Identity Threat Detection",
     page_icon="🛡️",
@@ -52,9 +45,6 @@ st.set_page_config(
 )
 
 if not config.WAZUH_VERIFY_SSL:
-    # Self-signed sertifikatlı lokal Wazuh üçün SSL yoxlaması bağlıdırsa,
-    # ən azı console-u xəbərdarlıq spam-ından qoruyaq və niyyəti aydın edək.
-    # (Bu, wazuh_auditor.py-nin audit-trail oxumaları üçün hələ də lazımdır.)
     import urllib3
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -67,28 +57,49 @@ _ARGUS_LOG_FILE = Path(config.ARGUS_LOG_DIR) / config.ARGUS_LOG_FILENAME
 
 def send_to_wazuh(payload):
     """
-    KÖK SƏBƏB DÜZƏLİŞİ: bu funksiya ARTIQ OpenSearch-ə birbaşa yazmır.
+    KÖK SƏBƏB DÜZƏLİŞİ (Cloud <-> ev şəbəkəsi): Cloud-da işləyən Streamlit
+    tətbiqi sizin ev kompüterinizin fayl sisteminə birbaşa yaza BİLMƏZ —
+    bu, iki tamam ayrı maşındır. Əvvəlki versiya ARGUS_LOG_DIR-ə "yazır" və
+    "uğurlu" qaytarırdı, amma bu fayl Cloud-un öz ötəri konteynerində
+    yaranıb yox olurdu, Wazuh manager-ə heç vaxt çatmırdı.
 
-    Əvvəlki versiya hadisələri birbaşa "argus-itdr-events" adlı özəl
-    OpenSearch indeksinə (WAZUH_ENDPOINT/_doc) POST edirdi. Bu texniki
-    olaraq "uğurla" yazılsa da, sənəd heç vaxt Wazuh-un qayda mühərrikindən
-    (rules engine) keçmirdi, ona görə də Wazuh Dashboard-un Overview və
-    Threat Hunting ekranlarında (bunlar "wazuh-alerts-*" indeksinə baxır)
-    HEÇ VAXT görünmürdü — "loqlar Wazuh-a getmir" probleminin əsl kök
-    səbəbi bu idi.
-
-    İndi hadisə lokal NDJSON fayla ("Argus log bridge") əlavə olunur.
-    Wazuh manager bu faylı <localfile> bloku ilə tail edir, JSON kimi
-    decode edir, local_rules.xml-dəki Argus qaydalarından keçirir və
-    nəticəni əsl "wazuh-alerts-*" indeksinə yazır (bax: WAZUH_SETUP.md).
+    İndi iki rejim var:
+      1) ARGUS_INGEST_URL təyin olunubsa (Cloud + ev arasında "ingest
+         bridge" qurulub — bax receiver.py) -> hadisə HTTP POST ilə bu
+         URL-ə göndərilir. Bridge onu evinizdə lokal fayla yazır.
+      2) ARGUS_INGEST_URL boşdursa (tətbiq Wazuh ilə EYNİ maşında
+         işləyir) -> köhnə davranış: birbaşa lokal fayla yazılır.
 
     Qaytarır: (ok: bool, data: dict | str-xəta-mesajı)
-
-    ÇAĞIRAN KOD BU NƏTİCƏNİ MÜTLƏQ YOXLAMALIDIR. Tab 3 (Red Team Attack
-    Controller) bunu artıq yoxlayır və Wazuh-un cavabından asılı olmayaraq
-    "Attack execution completed" göstərmir — real yazma/fayl xətaları
-    UI-da açıq görünür.
     """
+    if config.ARGUS_INGEST_URL:
+        try:
+            headers = {
+                "Content-Type": "application/json",
+                # ngrok pulsuz planın HTML interstitial səhifəsini bypass edir —
+                # bu olmadan cavab HTML olur və JSON parse xətası yaranır.
+                "ngrok-skip-browser-warning": "true",
+            }
+            if config.ARGUS_INGEST_TOKEN:
+                headers["X-Argus-Token"] = config.ARGUS_INGEST_TOKEN
+
+            resp = requests.post(
+                config.ARGUS_INGEST_URL,
+                headers=headers,
+                json=payload,
+                timeout=15,
+            )
+            if resp.status_code in (200, 201):
+                try:
+                    return True, resp.json()
+                except Exception:
+                    return True, {"written": True}
+            return False, f"HTTP {resp.status_code}: {resp.text[:300]}"
+        except Exception as e:
+            return False, f"Ingest bridge bağlantı xətası: {e}"
+
+    # Fallback: eyni maşında lokal fayla yazmaq (Wazuh manager elə bu
+    # kompüterdə işləyirsə, ARGUS_INGEST_URL boş saxlanılıb).
     try:
         _ARGUS_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
         with open(_ARGUS_LOG_FILE, "a", encoding="utf-8") as f:
@@ -99,12 +110,6 @@ def send_to_wazuh(payload):
 
 
 def detect_columns(df: pd.DataFrame) -> dict:
-    """
-    Fərqli mənbələrdən gələn log-larda sütun adlarını unifikasiya edir.
-    Bütün tab-larda təkrarlanan eyni if/else zəncirinin əvəzinə tək yerdən idarə olunur.
-    Tapılmayan sütun üçün None qaytarır (fərziyyə ilə mövcud olmayan sütuna
-    müraciət edib crash almaq əvəzinə).
-    """
     def pick(*candidates):
         for c in candidates:
             if c in df.columns:
@@ -119,15 +124,6 @@ def detect_columns(df: pd.DataFrame) -> dict:
 
 
 def classify_risk(event_value) -> str:
-    """
-    Ortaq risk təsnifat funksiyası — bütün tab-larda (Tab 2, Tab 4, Tab 5...) eyni
-    məntiq istifadə olunsun deyə mərkəzləşdirilib.
-
-    4624 (SUCCESS)  -> COMPROMISED : hücumçu artıq keçərli sessiya/token əldə edib.
-                        Bu, ən yüksək prioritetli haldır (session revoke + disable lazımdır).
-    4625 (FAILED)   -> ATTEMPTED   : davam edən/uğursuz hücum cəhdi, hələ kompromis yoxdur.
-    digər/naməlum   -> UNKNOWN
-    """
     val = str(event_value)
     if "4624" in val:
         return "COMPROMISED"
@@ -137,34 +133,10 @@ def classify_risk(event_value) -> str:
 
 
 def event_matches(series: pd.Series, code) -> pd.Series:
-    """
-    EventID sütununu tipdən asılı olmadan (int, str, ya da qarışıq) müqayisə edir.
-
-    KÖK SƏBƏB QEYDİ: `series == 4624` kimi birbaşa bərabərlik müqayisəsi, sütun tipi
-    dəyişəndə (məs. SQLite-dan string kimi yüklənəndə, halbuki attack_engine int
-    yazır) SƏSSİZCƏ False qaytarır. Bu, Tab 4 Live Incident Feed-də faktiki
-    kompromis olmuş (4624) istifadəçilərin səhvən "LOW" kimi göstərilməsinin əsl
-    kök səbəbi idi. `.astype(str).str.contains()` isə tipdən asılı olmayaraq düzgün
-    işləyir, ona görə bütün EventID müqayisələri bu funksiya üzərindən aparılmalıdır.
-    (Eyni fix `modules/wazuh_auditor.py`-də `_event_matches()` adı ilə də tətbiq olunub.)
-    """
     return series.astype(str).str.contains(str(code), na=False)
 
 
 def ensure_timestamp_column(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    UI-ONLY köməkçi funksiya (backend/session_state-ə TOXUNMUR).
-
-    Göstərilən cədvəldə 'Timestamp' sütununun mövcudluğunu təmin edir və onu
-    ən sol sütuna çıxarır ki, hər hadisənin nə vaxt baş verdiyi ilk baxışda
-    görünsün. Əgər DataFrame-də artıq 'Timestamp' sütunu varsa (məs. Tab 3-dəki
-    bəzi hücum event-ləri artıq onu daxil edir), sadəcə sütun sırası düzəldilir.
-    Yoxdursa, göstərim anının cari vaxtı ("indi göründüyü an") oturdulur.
-
-    QEYD: bu, YALNIZ görüntü üçün bir KOPYA üzərində işləyir — nə
-    `st.session_state['df']`, nə də SQLite-dakı saxlanmış data dəyişdirilmir,
-    beləliklə mövcud data axını/backend məntiqi toxunulmaz qalır.
-    """
     if df is None or df.empty:
         return df
 
@@ -174,8 +146,6 @@ def ensure_timestamp_column(df: pd.DataFrame) -> pd.DataFrame:
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         display_df.insert(0, "Timestamp", now_str)
     else:
-        # Mövcud Timestamp dəyərlərini oxunaqlı formata (YYYY-MM-DD HH:MM:SS)
-        # çevirməyə çalışırıq; çevrilə bilməyən dəyərlər olduğu kimi saxlanılır.
         def _fmt(v):
             try:
                 return pd.to_datetime(v).strftime("%Y-%m-%d %H:%M:%S")
@@ -263,8 +233,6 @@ def generate_pdf_report(df, resolved_users, posture_score):
 
     elements.append(Paragraph("2. Threat Analysis & Remediation Log", h2_style))
 
-    # UI-ONLY DÜZƏLİŞ: PDF-dəki hadisə cədvəlinə də Timestamp sütunu əlavə olunur
-    # (görüntü üçün ensure_timestamp_column() istifadə olunur, mənbə df dəyişmir).
     pdf_display_df = ensure_timestamp_column(df) if not df.empty else df
 
     table_data = [[
@@ -327,14 +295,10 @@ def generate_pdf_report(df, resolved_users, posture_score):
 
 
 # ========================================================================
-# 🔐 AUTHENTICATION LAYER (SOC-standard Login Panel)
-# ------------------------------------------------------------------------
-# Bu bölmə mövcud tab/session_state məntiqinə TOXUNMUR — sadəcə,
-# istifadəçi autentifikasiya olunmayıbsa əsas interfeysin render
-# olunmasının qarşısını alır (st.stop() ilə).
+# 🔐 AUTHENTICATION LAYER
 # ========================================================================
 ARGUS_ADMIN_USER = os.getenv("ARGUS_ADMIN_USER", "")
-ARGUS_ADMIN_HASH = os.getenv("ARGUS_ADMIN_HASH", "")  # SHA-256 hex digest
+ARGUS_ADMIN_HASH = os.getenv("ARGUS_ADMIN_HASH", "")
 
 MAX_LOGIN_ATTEMPTS = 3
 LOCKOUT_SECONDS = 30
@@ -345,11 +309,6 @@ def _hash_password(password: str) -> str:
 
 
 def _verify_credentials(username: str, password: str) -> bool:
-    """
-    SHA-256 hash müqayisəsi. `hmac.compare_digest` ilə sabit-vaxt (constant-time)
-    müqayisə aparılır ki, timing-attack vasitəsilə şifrə/istifadəçi adı hərf-hərf
-    çıxarıla bilməsin.
-    """
     if not ARGUS_ADMIN_USER or not ARGUS_ADMIN_HASH:
         return False
     entered_hash = _hash_password(password)
@@ -359,14 +318,9 @@ def _verify_credentials(username: str, password: str) -> bool:
 
 
 def _log_login_event(event_type: str, username: str):
-    """
-    UI login hadisəsini Argus-un MÖVCUD log body-sinə (`send_to_wazuh` -> Argus
-    log bridge -> Wazuh manager -> wazuh-alerts-*) yazır. Beləliklə login
-    hadisələri də digər ITDR telemetriyası ilə eyni audit trail-də görünür.
-    """
     payload = {
         "timestamp": datetime.utcnow().isoformat() + "Z",
-        "event_type": event_type,  # UI_LOGIN_SUCCESS / UI_LOGIN_FAILED / UI_LOGIN_LOCKOUT / UI_LOGOUT
+        "event_type": event_type,
         "user": username or "unknown",
         "source": "Argus-UI-Auth",
         "severity": "INFO" if event_type == "UI_LOGIN_SUCCESS" else "HIGH",
@@ -375,7 +329,6 @@ def _log_login_event(event_type: str, username: str):
     try:
         send_to_wazuh(payload)
     except Exception:
-        # Audit log göndərilməsi heç vaxt login axınını bloklamamalıdır
         pass
 
 
@@ -387,7 +340,6 @@ def _init_auth_state():
 
 
 def render_login_page():
-    """Korporativ SOC-tərzli dark-mode login paneli (st.form + rate limiting)."""
     st.markdown(
         """
         <style>
@@ -494,18 +446,11 @@ if not st.session_state["authenticated"]:
 
 
 # ========================================================================
-# 🎨 SIDEBAR BRANDING + VERTİKAL NAVİQASİYA MENYUSU (YENİ — UI/UX-ONLY)
-# ------------------------------------------------------------------------
-# Aşağıdakı bölmə YALNIZ vizual təqdimatı dəyişir: əvvəlki üfüqi st.tabs()
-# strukturunun yerinə sol Sidebar-da vertikal st.sidebar.radio() menyusu
-# qurulur. Backend məntiqi, session_state strukturu və login axını
-# TOXUNULMAZ qalır — sadəcə məzmun bloklarının "with tabX:" əvəzinə
-# "if selected_menu == ...:" ilə şərtləndirilir.
+# 🎨 SIDEBAR BRANDING + VERTİKAL NAVİQASİYA MENYUSU
 # ========================================================================
 st.markdown(
     """
     <style>
-    /* Sidebar-ın ümumi SOC-tərzi fon və border rəngi */
     section[data-testid="stSidebar"] {
         background: linear-gradient(180deg, #0b0f19 0%, #05070c 100%);
         border-right: 1px solid #1f2937;
@@ -556,7 +501,6 @@ st.markdown(
         text-transform: uppercase;
     }
 
-    /* Radio-nu SOC-tərzi vertikal menyu kimi stilizə et */
     section[data-testid="stSidebar"] div[role="radiogroup"] {
         gap: 0.15rem;
     }
@@ -604,17 +548,12 @@ selected_menu = st.sidebar.radio(
     key="argus_nav_menu",
 )
 
-# Login/logout bloku (mövcud, dəyişməz) — brend + menyudan sonra, sidebar-ın
-# alt hissəsində görünür.
 render_logout_sidebar()
 # ========================================================================
 # 🔐 END AUTHENTICATION LAYER / END SIDEBAR NAVIGATION
 # ========================================================================
 
 
-# ----------------------------------------------------------------------
-# Session state initialization — İNDİ SQLite-dan yüklənir (persistence)
-# ----------------------------------------------------------------------
 if 'df' not in st.session_state:
     persisted_df = storage.load_events()
     if persisted_df.empty:
@@ -635,7 +574,7 @@ if selected_menu == "📥 Live Log Ingestion":
     with col_upload:
         uploaded_file = st.file_uploader("Upload CSV Log File", type=["csv"])
     with col_reset:
-        st.write("")  # dikey boşluq — düyməni upload sahəsi ilə tərəf-tərəf düzləndirir
+        st.write("")
         st.write("")
         if st.button("🧹 Clear / Reset Telemetry", help="Yaddaşdakı bütün event-ləri və remediation tarixçəsini təmizləyir."):
             st.session_state['df'] = pd.DataFrame(columns=storage.EVENT_COLUMNS)
@@ -699,23 +638,17 @@ elif selected_menu == "🤖 AI Threat Analysis & Auto-Fix":
         cols = detect_columns(df)
         event_col, user_col, ip_col = cols["event"], cols["user"], cols["ip"]
 
-        # Ən yeni hadisələr əvvəldə görünsün — Timestamp varsa ona görə,
-        # yoxdursa DataFrame-ə əlavə olunma sırasına görə (sonuncu əlavə = ən yeni)
         if 'Timestamp' in df.columns:
             df = df.sort_values('Timestamp', ascending=False)
         else:
             df = df.iloc[::-1]
 
         if event_col:
-            # Uğursuz cəhdlər = davam edən hücum cəhdi (ATTEMPTED)
             failed_mask = df[event_col].astype(str).str.contains('4625')
-            # Uğurlu login = faktiki kompromis olmuş hesab (COMPROMISED) — daha yüksək prioritet!
             success_mask = df[event_col].astype(str).str.contains('4624')
 
             threat_df = df[failed_mask | success_mask].copy()
             threat_df['_risk_level'] = threat_df[event_col].apply(classify_risk)
-            # Kompromis olanlar (COMPROMISED) əvvəldə görünsün; eyni risk səviyyəsi daxilində
-            # isə artıq yuxarıda tətbiq olunan "ən yeni əvvəldə" sırası qorunsun (stable sort)
             threat_df = threat_df.sort_values(
                 '_risk_level', key=lambda s: s.map({'COMPROMISED': 0, 'ATTEMPTED': 1}).fillna(2),
                 kind='mergesort'
@@ -729,7 +662,6 @@ elif selected_menu == "🤖 AI Threat Analysis & Auto-Fix":
             threat_df = df
 
         resolved_count = len(st.session_state['resolved_users'])
-        # Kompromis olmuş hesablar daha ağır risk daşıyır, ona görə skor cəzasında ayrıca çəkilir
         active_failures = max(0, failed_attempts - resolved_count)
         active_compromised = max(0, compromised_count - resolved_count)
         calculated_score = max(0, 100 - (active_failures * 10) - (active_compromised * 20))
@@ -789,10 +721,8 @@ elif selected_menu == "🤖 AI Threat Analysis & Auto-Fix":
                             st.error(f"🚨 **Risk Assessment:** Active Threat Detected on `{user}` via `{auth_method}`!")
                             st.info(f"🤖 **Suggested Action:** Revoke all Active Refresh Tokens and trigger Conditional Access Lockout for `{user}`.")
 
-                        # --- İKİ DÜYMƏ ÜÇÜN SÜTUNLAR ---
                         col_a, col_b = st.columns(2)
 
-                        # Sütun A: MÖVCUD REMEDIATION DÜYMƏSİ
                         with col_a:
                             if st.button(f"🚫 Execute Remediation ({user})", key=f"btn_ai_block_{idx}_{user}"):
                                 use_real = config.ENABLE_REAL_REMEDIATION and attack_engine is not None
@@ -835,7 +765,6 @@ elif selected_menu == "🤖 AI Threat Analysis & Auto-Fix":
                                     st.warning(f"⚠️ Remediation event Wazuh-a GÖNDƏRİLMƏDİ: {wazuh_detail}")
                                 st.rerun()
 
-                        # Sütun B: YENİ SIGMA RULE GENERATION DÜYMƏSİ
                         with col_b:
                             if st.button(f"🧠 Generate Sigma Rule ({user})", key=f"btn_sigma_{idx}_{user}"):
                                 try:
@@ -870,9 +799,6 @@ elif selected_menu == "⚔️ Red Team Attack Controller":
             "dəyərlərini doldurduğunuzdan əmin olun."
         )
 
-    # YENİ: istifadəçi siyahısının HARADAN gəldiyi (Microsoft Graph canlı
-    # sorğusu, yoxsa lokal/secrets fallback) artıq UI-da açıq göstərilir —
-    # "niyə saxta userlərə hücum edir" sualı bir daha sükutla qalmasın.
     if wordlist_info:
         if wordlist_info["graph_fetch_ok"]:
             st.success(
@@ -885,14 +811,14 @@ elif selected_menu == "⚔️ Red Team Attack Controller":
                 f"Graph sorğusu uğursuz oldu: {wordlist_info['graph_fetch_detail']}"
             )
 
-    # DƏYİŞİKLİK: əvvəllər burada "WAZUH_PASSWORD boşdursa heç nə göndərilməyəcək"
-    # xəbərdarlığı var idi — bu artıq YANLIŞ, çünki send_to_wazuh() indi WAZUH_PASSWORD-dən
-    # asılı deyil (lokal fayla yazır). Bunun yerinə həqiqi ötürücünü göstəririk.
-    st.caption(
-        f"📡 Hadisələr Wazuh manager-in tail etdiyi lokal fayla yazılır: `{_ARGUS_LOG_FILE}`. "
-        "Bu qovluq docker-compose-da `wazuh.manager` konteynerinin `/var/log/argus` qovluğuna "
-        "bind-mount edilməlidir və `local_rules.xml` manager-ə yüklənməlidir (bax: `WAZUH_SETUP.md`)."
-    )
+    if config.ARGUS_INGEST_URL:
+        st.caption(f"📡 Hadisələr Ingest Bridge üzərindən göndərilir: `{config.ARGUS_INGEST_URL}`")
+    else:
+        st.caption(
+            f"📡 Hadisələr Wazuh manager-in tail etdiyi lokal fayla yazılır: `{_ARGUS_LOG_FILE}`. "
+            "Bu qovluq docker-compose-da `wazuh.manager` konteynerinin `/var/log/argus` qovluğuna "
+            "bind-mount edilməlidir və `local_rules.xml` manager-ə yüklənməlidir (bax: `WAZUH_SETUP.md`)."
+        )
 
     col_left, col_right = st.columns([1, 1])
 
@@ -938,10 +864,6 @@ elif selected_menu == "⚔️ Red Team Attack Controller":
             terminal_placeholder.code("\n".join(console_logs), language="bash")
 
             for user in attack_engine.users[:max_targets_count]:
-                # BUG FIX: eyni MSAL exception riski (throttling/429, realm discovery
-                # xətası) burada da mövcuddur — enumeration da çoxlu istifadəçini
-                # ardıcıl sorğulayır. try/except olmadan bir tək throttled sorğu
-                # bütün tətbiqi crash edə bilər.
                 try:
                     result = attack_engine.public_app.acquire_token_by_username_password(
                         username=user, password="DummyPassword123!", scopes=["https://graph.microsoft.com/.default"]
@@ -955,11 +877,11 @@ elif selected_menu == "⚔️ Red Team Attack Controller":
                         status_text = f"[?] CAVAB ({user}): {err_desc[:40]}..."
                 except Exception as e:
                     status_text = f"[-] UĞURSUZ (exception): {user} -> ({str(e)[:60]}...)"
-                    time.sleep(1.5)  # throttling ehtimalını azaltmaq üçün əlavə gözləmə
+                    time.sleep(1.5)
 
                 console_logs.append(status_text)
                 terminal_placeholder.code("\n".join(console_logs), language="bash")
-                time.sleep(0.3)  # BUG FIX: enumeration-da da heç bir gecikmə yox idi
+                time.sleep(0.3)
 
         elif btn_spray:
             if not spray_password_input:
@@ -969,11 +891,6 @@ elif selected_menu == "⚔️ Red Team Attack Controller":
                 terminal_placeholder.code("\n".join(console_logs), language="bash")
 
                 for user in attack_engine.users[:max_targets_count]:
-                    # BUG FIX (crash kök səbəbi): MSAL bəzi hallarda (throttling/429,
-                    # şəbəkə xətası, user_realm_discovery uğursuzluğu) OAuth error
-                    # dict-i QAYTARMIR — birbaşa exception (MsalServiceError və s.)
-                    # atır. Əvvəlki kod bunu gözləmirdi və ilk belə hadisədə BÜTÜN
-                    # Streamlit tətbiqi crash edirdi. İndi hər cəhd ayrıca qorunur.
                     try:
                         result = attack_engine.public_app.acquire_token_by_username_password(
                             username=user, password=spray_password_input, scopes=["https://graph.microsoft.com/.default"]
@@ -991,8 +908,6 @@ elif selected_menu == "⚔️ Red Team Attack Controller":
                             "ErrorCode": f"MSAL_EXCEPTION: {type(e).__name__}",
                             "Timestamp": datetime.utcnow().isoformat() + "Z"
                         })
-                        # Throttling ehtimalını azaltmaq üçün xətadan sonra bir az
-                        # daha uzun gözləyib davam edirik (loop-u dayandırmırıq).
                         time.sleep(1.5)
                         continue
 
@@ -1020,18 +935,12 @@ elif selected_menu == "⚔️ Red Team Attack Controller":
                         "Timestamp": datetime.utcnow().isoformat() + "Z"
                     })
 
-                    # BUG FIX: əvvəllər YALNIZ spray loop-unda heç bir gecikmə yox
-                    # idi (brute force-da sleep(1), MFA fatigue-də sleep(2) var idi).
-                    # Sürətli-ardıcıl MSAL sorğuları Entra ID-ni throttle edir —
-                    # yuxarıdakı exception-un əsl kök səbəbi məhz bu idi.
                     time.sleep(0.4)
 
         elif btn_brute:
             console_logs.append(f"[*] Executing Brute Force against {target_user_input}...\n")
             terminal_placeholder.code("\n".join(console_logs), language="bash")
 
-            # Öz şifrəniz varsa, siyahının ƏVVƏLİNƏ əlavə olunur ki, ilk cəhddə
-            # sınanılsın (wordlist-dən 5-i ilə birlikdə dublikat yaranmaması üçün süzülür).
             wordlist_sample = attack_engine.passwords[:5]
             if custom_brute_password:
                 test_passwords = [custom_brute_password] + [
@@ -1043,8 +952,6 @@ elif selected_menu == "⚔️ Red Team Attack Controller":
                 test_passwords = wordlist_sample
 
             for pwd in test_passwords:
-                # BUG FIX: MSAL exception (throttling/429, realm discovery) riski
-                # burada da mövcuddur — try/except olmadan crash ehtimalı var idi.
                 try:
                     result = attack_engine.public_app.acquire_token_by_username_password(
                         username=target_user_input, password=pwd, scopes=["https://graph.microsoft.com/.default"]
@@ -1082,7 +989,6 @@ elif selected_menu == "⚔️ Red Team Attack Controller":
             else:
                 for i in range(1, 3):
                     console_logs.append(f"[*] Attempt #{i}...")
-                    # BUG FIX: eyni MSAL exception riski buradadır da qorunur.
                     try:
                         result = attack_engine.public_app.acquire_token_by_username_password(
                             username=target_user_input, password=spray_password_input, scopes=["https://graph.microsoft.com/.default"]
@@ -1110,12 +1016,6 @@ elif selected_menu == "⚔️ Red Team Attack Controller":
             st.session_state['df'] = pd.concat([st.session_state['df'], new_df], ignore_index=True)
             storage.append_events(new_df)
 
-            # ------------------------------------------------------------
-            # BUG FIX: bundan əvvəl bu loop-un nəticəsi HEÇ YOXLANMIRDI və
-            # aşağıda "Attack execution completed" mesajı Wazuh-un cavabından
-            # asılı olmayaraq HƏMİŞƏ göstərilirdi. İndi hər hadisənin nəticəsi
-            # sayılır və uğursuzluqda dəqiq HTTP/bağlantı xətası UI-da göstərilir.
-            # ------------------------------------------------------------
             wazuh_ok_count = 0
             wazuh_fail_count = 0
             wazuh_errors = []
@@ -1150,8 +1050,9 @@ elif selected_menu == "⚔️ Red Team Attack Controller":
                     for err in wazuh_errors:
                         st.code(err)
                     st.caption(
-                        "Tipik səbəblər: `ARGUS_LOG_DIR` yazıla bilən deyil, disk dolub, "
-                        "və ya proses o qovluğa yazmaq icazəsinə malik deyil."
+                        "Tipik səbəblər: `ARGUS_INGEST_URL` yanlışdır/əlçatan deyil, "
+                        "receiver.py evinizdə işləmir, ngrok tuneli dəyişib, "
+                        "və ya `ARGUS_LOG_DIR` yazıla bilən deyil (lokal rejimdə)."
                     )
         else:
             st.success("Attack execution completed.")
@@ -1186,7 +1087,6 @@ elif selected_menu == "🛡️ Blue Team & ITDR Dashboard":
 
         st.markdown("---")
 
-        # --- YENİ: 🔓 Compromised Accounts bölməsi ---
         st.subheader("🔓 Compromised Accounts (Successful Logon After/During Attack)")
 
         if event_col and user_col:
@@ -1224,10 +1124,6 @@ elif selected_menu == "🛡️ Blue Team & ITDR Dashboard":
                 err_code = row.get("ErrorCode", "AADSTS50126")
                 ts_display = row.get("Timestamp", "")
 
-                # DÜZƏLİŞ (kök səbəb): əvvəlki `event_id == 4624` bərabərlik müqayisəsi
-                # EventID sütununun tipi (str vs int) mənbəyə görə dəyişəndə səssizcə
-                # False qaytarırdı və COMPROMISED istifadəçilər səhvən "LOW" görünürdü.
-                # classify_risk() tipdən asılı olmayan str-based yoxlama aparır.
                 risk = classify_risk(event_id)
 
                 if risk == "COMPROMISED":
@@ -1301,8 +1197,6 @@ elif selected_menu == "📊 Interactive Analytics":
         with col_right:
             st.subheader("📊 Failure vs Success Ratio")
             if event_col:
-                # .map({4625: ...}) sütun tipi (int vs str) uyğun gəlmədikdə NaN qaytarırdı;
-                # classify_risk() əsaslı str-based yoxlama tipdən asılı olmadan işləyir.
                 status_labels = df[event_col].apply(
                     lambda x: 'SUCCESS (4624)' if classify_risk(x) == 'COMPROMISED'
                     else ('FAILED (4625)' if classify_risk(x) == 'ATTEMPTED' else 'OTHER')

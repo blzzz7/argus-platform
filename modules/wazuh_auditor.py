@@ -3,25 +3,24 @@ modules/wazuh_auditor.py
 -------------------------
 Argus ITDR üçün Audit modulu. İki əsas vəzifəsi var:
 
-  1. AUDIT TRAIL — Wazuh Indexer-ə (OpenSearch, adətən port 9200) əvvəllər
-     `send_to_wazuh()` ilə yazılmış hadisələri GERİ oxuyub göstərmək.
-     (Qeyd: `app.py`/`app_ui.py`-dakı `send_to_wazuh()` yalnız YAZIR;
-     bu modul isə OXUYUR — beləliklə "nə göndərdik, nə qaldı" sualına cavab verir.)
-
+  1. AUDIT TRAIL — Wazuh Indexer-ə (OpenSearch, adətən port 9200) daxil olan
+     ƏSL alert-ləri (local_rules.xml-dən keçib "wazuh-alerts-*" indeksinə
+     düşənləri) geri oxuyub göstərmək.
   2. COMPLIANCE CHECKS — daxil edilmiş identity telemetriyası üzərində
      bir sıra təhlükəsizlik qaydalarını yoxlayıb PASS/FAIL + tövsiyə
-     şəklində nəticə verir (SOC-un "hansı boşluqlar var" sualına cavab).
+     şəklində nəticə verir.
 
-Bu modul `modules/config.py`-dakı eyni WAZUH_* mühit dəyişənlərini istifadə edir,
-yəni `.env`-də ayrıca heç nə əlavə etməyə ehtiyac yoxdur.
+KÖK SƏBƏB DÜZƏLİŞİ (bu versiyada): əvvəlki `WazuhAuditor.__init__` index
+bazasını `config.WAZUH_ENDPOINT`-dən (`.../argus-itdr-events/_doc`) çıxarırdı.
+Bu indeks isə send_to_wazuh() artıq ora yazmadığı üçün (bax: app_ui.py,
+Argus Ingest Bridge) HEÇ VAXT dolmur — audit oxuması ona görə həmişə boş
+qayıdırdı. İndi auditor `config.WAZUH_ALERTS_INDEX` ("wazuh-alerts-*") və
+`config.WAZUH_INDEXER_BASE`-i istifadə edir — yəni local_rules.xml-dən keçib
+ƏSL Wazuh alert-i olan sənədləri oxuyur.
 
-DƏYİŞİKLİK (bug fix): `run_compliance_checks()`-də EventID sütunu üzərində
-birbaşa `== 4625` bərabərlik müqayisəsi var idi. Sütun mənbəyə görə (SQLite,
-CSV, ya da attack_engine-in yaratdığı DataFrame) bəzən int, bəzən str olaraq
-gəldiyi üçün bu müqayisə səssizcə False qaytarıb bütün compliance qaydalarını
-(C1, C2) yalançı "PASS" göstərirdi. Bu, `app_ui.py`-də `event_matches()` adı
-ilə artıq bir dəfə tapılıb düzəldilmiş EYNİ kök səbəb bug-ıdır — indi bu modula
-da tətbiq olunub.
+Həmçinin: ngrok pulsuz tunelin HTML interstitial səhifəsini bypass etmək
+üçün bütün sorğulara `ngrok-skip-browser-warning` header-i əlavə olunub —
+bu olmadan `resp.json()` HTML-i parse etməyə çalışıb sükutla uğursuz olurdu.
 """
 import requests
 import pandas as pd
@@ -33,8 +32,7 @@ from . import config
 def _event_matches(series: pd.Series, code) -> pd.Series:
     """
     EventID sütununu tipdən asılı olmadan (int, str, ya da qarışıq) müqayisə edir.
-    `app_ui.py`-dəki `event_matches()` ilə eyni məntiq — iki yerdə fərqli davranış
-    olmasın deyə burada da tətbiq olunur.
+    `app_ui.py`-dəki `event_matches()` ilə eyni məntiq.
     """
     return series.astype(str).str.contains(str(code), na=False)
 
@@ -45,44 +43,90 @@ class WazuhAuditor:
     qaydalarını işlədən mərkəzləşdirilmiş sinif.
     """
 
-    def __init__(self, endpoint=None, user=None, password=None, verify_ssl=None):
-        # endpoint nümunəsi: https://localhost:9200/argus-itdr-events/_doc
-        # Axtarış üçün bizə "_doc" olmadan indeks bazası lazımdır:
-        raw_endpoint = endpoint or config.WAZUH_ENDPOINT
-        self.index_base = raw_endpoint.rsplit("/_doc", 1)[0].rstrip("/")
+    def __init__(self, indexer_base=None, index=None, user=None, password=None, verify_ssl=None):
+        # KÖK SƏBƏB DÜZƏLİŞİ: artıq WAZUH_ENDPOINT-dən deyil, ayrıca
+        # WAZUH_INDEXER_BASE (OpenSearch bazası) və WAZUH_ALERTS_INDEX
+        # ("wazuh-alerts-*") dəyişənlərindən oxuyur.
+        #
+        # TUNEL MƏHDUDİYYƏTİ DÜZƏLİŞİ: ngrok-un pulsuz planı eyni anda
+        # YALNIZ BİR aktiv tunelə icazə verir. Ona görə OpenSearch-ə ayrıca
+        # tunel açmaq əvəzinə, receiver.py-dəki "/search" proksisi eyni
+        # (Ingest Bridge üçün artıq açıq olan) tunel üzərindən istifadə
+        # olunur. ARGUS_INGEST_URL təyin olunubsa, bu rejim avtomatik
+        # aktivləşir; boşdursa, köhnə davranış (OpenSearch-ə birbaşa
+        # sorğu) saxlanılır (Wazuh tətbiqlə EYNİ maşındadırsa məna kəsb edir).
+        self.use_proxy = bool(config.ARGUS_INGEST_URL)
+        self.proxy_url = config.ARGUS_INGEST_URL.rsplit("/ingest", 1)[0] + "/search" if self.use_proxy else None
+        self.proxy_token = config.ARGUS_INGEST_TOKEN
+
+        self.indexer_base = (indexer_base or config.WAZUH_INDEXER_BASE).rstrip("/")
+        self.index = index or config.WAZUH_ALERTS_INDEX
         self.user = user or config.WAZUH_USER
         self.password = password or config.WAZUH_PASSWORD
         self.verify_ssl = config.WAZUH_VERIFY_SSL if verify_ssl is None else verify_ssl
 
-    # ------------------------------------------------------------------
-    # 1) AUDIT TRAIL — Wazuh Indexer-dən geri oxuma
-    # ------------------------------------------------------------------
     def _auth(self):
         if not self.password:
             return None
         return (self.user, self.password)
 
+    def _headers(self):
+        return {
+            "Content-Type": "application/json",
+            # ngrok pulsuz planın HTML interstitial səhifəsini bypass edir.
+            "ngrok-skip-browser-warning": "true",
+        }
+
     def fetch_alerts(self, size: int = 100, query: dict = None):
         """
-        Wazuh Indexer-dəki (OpenSearch) sənədləri OpenSearch _search API-si ilə
-        geri çəkir. `query` verilməzsə, son `size` sənədi tarixə görə sıralayıb qaytarır.
+        Wazuh Indexer-dəki (OpenSearch) "wazuh-alerts-*" sənədlərini
+        _search API-si ilə geri çəkir.
 
         Qaytarır: (ok: bool, data: list[dict] | str-xəta-mesajı)
         """
-        if not self._auth():
-            return False, "WAZUH_PASSWORD .env-də təyin olunmayıb."
-
         body = query or {
             "size": size,
             "sort": [{"timestamp": {"order": "desc", "unmapped_type": "date"}}],
             "query": {"match_all": {}}
         }
 
+        if self.use_proxy:
+            # TUNEL MƏHDUDİYYƏTİ DÜZƏLİŞİ: OpenSearch-ə birbaşa yox,
+            # receiver.py-dəki /search proksisinə (eyni ngrok tuneli
+            # üzərindən) sorğu göndərilir.
+            try:
+                headers = {"Content-Type": "application/json"}
+                if self.proxy_token:
+                    headers["X-Argus-Token"] = self.proxy_token
+                resp = requests.post(
+                    self.proxy_url,
+                    headers=headers,
+                    json={"index": self.index, "query": body},
+                    timeout=15,
+                )
+            except Exception as e:
+                return False, f"Ingest Bridge /search proksi bağlantı xətası: {e}"
+
+            if resp.status_code != 200:
+                return False, f"HTTP {resp.status_code}: {resp.text[:300]}"
+
+            try:
+                hits = resp.json().get("hits", {}).get("hits", [])
+            except Exception as e:
+                return False, f"Proksi cavab parse xətası: {e} | Cavab: {resp.text[:200]}"
+
+            alerts = [h.get("_source", {}) | {"_id": h.get("_id")} for h in hits]
+            return True, alerts
+
+        # Köhnə rejim: OpenSearch-ə birbaşa (Wazuh tətbiqlə eyni maşındadırsa).
+        if not self._auth():
+            return False, "WAZUH_PASSWORD .env-də təyin olunmayıb."
+
         try:
             resp = requests.post(
-                f"{self.index_base}/_search",
+                f"{self.indexer_base}/{self.index}/_search",
                 auth=self._auth(),
-                headers={"Content-Type": "application/json"},
+                headers=self._headers(),
                 json=body,
                 verify=self.verify_ssl,
                 timeout=15,
@@ -96,7 +140,8 @@ class WazuhAuditor:
         try:
             hits = resp.json().get("hits", {}).get("hits", [])
         except Exception as e:
-            return False, f"Cavab parse xətası: {e}"
+            snippet = resp.text[:200] if hasattr(resp, "text") else str(e)
+            return False, f"Cavab parse xətası (JSON deyil ola bilər): {e} | Cavab: {snippet}"
 
         alerts = [h.get("_source", {}) | {"_id": h.get("_id")} for h in hits]
         return True, alerts
@@ -111,6 +156,7 @@ class WazuhAuditor:
                     "should": [
                         {"match": {"user": username}},
                         {"match": {"target_user": username}},
+                        {"match": {"data.win.eventdata.targetUserName": username}},
                     ],
                     "minimum_should_match": 1,
                 }
@@ -126,17 +172,10 @@ class WazuhAuditor:
         return pd.DataFrame(data)
 
     # ------------------------------------------------------------------
-    # 2) COMPLIANCE CHECKS — Identity telemetriyası üzərində qayda mühərriki
+    # COMPLIANCE CHECKS — Identity telemetriyası üzərində qayda mühərriki
     # ------------------------------------------------------------------
     @staticmethod
     def run_compliance_checks(df: pd.DataFrame, resolved_users: set = None) -> list:
-        """
-        Daxil edilmiş identity log-ları (Tab 1/3-dən gələn DataFrame) üzərində
-        bir sıra ITDR compliance qaydalarını işlədir.
-
-        Qaytarır: list[dict], hər biri:
-            {id, title, severity, status ("PASS"/"FAIL"/"WARN"), description, recommendation}
-        """
         resolved_users = resolved_users or set()
         findings = []
 
@@ -147,7 +186,7 @@ class WazuhAuditor:
                 "severity": "INFO",
                 "status": "WARN",
                 "description": "Audit üçün heç bir identity log daxil edilməyib.",
-                "recommendation": "Tab 1-dən CSV yükləyin və ya Tab 3-də simulyasiya işə salın."
+                "recommendation": "Live Log Ingestion-dan CSV yükləyin və ya Red Team Attack Controller-də simulyasiya işə salın."
             })
             return findings
 
@@ -158,12 +197,8 @@ class WazuhAuditor:
         }
         event_col, user_col, ip_col = cols["event"], cols["user"], cols["ip"]
 
-        # BUG FIX: əvvəllər `df[event_col] == 4625` idi — sütun tipi (int/str) mənbəyə
-        # görə dəyişəndə bu bərabərlik səssizcə False qaytarırdı və C1/C2 həmişə
-        # yalançı "PASS" göstərirdi. `_event_matches()` tipdən asılı olmadan işləyir.
         failed_df = df[_event_matches(df[event_col], 4625)] if event_col else df
 
-        # --- C1: Smart Lockout tələb edən hesablar varmı ---
         if event_col and user_col:
             lockout_counts = failed_df[user_col].value_counts()
             locked = lockout_counts[lockout_counts >= 3]
@@ -186,7 +221,6 @@ class WazuhAuditor:
                     "recommendation": "Mövcud vəziyyəti saxlayın."
                 })
 
-        # --- C2: Eyni IP-dən çoxlu fərqli hesaba hücum (password spray əlaməti) ---
         if ip_col and user_col:
             spray_pattern = failed_df.groupby(ip_col)[user_col].nunique()
             spray_ips = spray_pattern[spray_pattern >= 3]
@@ -209,7 +243,6 @@ class WazuhAuditor:
                     "recommendation": "Monitorinqi davam etdirin."
                 })
 
-        # --- C3: Zəif autentifikasiya metodları (OAuth2/NTLM = MFA-sız) ---
         if "AuthMethod" in df.columns:
             weak_methods = df[df["AuthMethod"].astype(str).str.contains("NTLM|OAuth2|PasswordSpray", case=False, na=False)]
             if len(weak_methods) > 0:
@@ -223,7 +256,6 @@ class WazuhAuditor:
                                        "legacy autentifikasiyanı bloklayın."
                 })
 
-        # --- C4: SOC cavab veriş sürəti (remediation coverage) ---
         threat_users = set(failed_df[user_col].unique()) if (event_col and user_col) else set()
         if threat_users:
             coverage = len(threat_users & resolved_users) / len(threat_users) * 100
@@ -236,14 +268,13 @@ class WazuhAuditor:
                 "status": status,
                 "description": f"Aşkarlanan {len(threat_users)} təhdid edilmiş hesabdan "
                                 f"{len(threat_users & resolved_users)}-i remediate edilib ({coverage:.0f}%).",
-                "recommendation": "Remediate edilməmiş qalan hesablar üçün Tab 2-dən aksiya götürün."
+                "recommendation": "Remediate edilməmiş qalan hesablar üçün AI Threat Analysis menyusundan aksiya götürün."
             })
 
         return findings
 
     @staticmethod
     def compliance_score(findings: list) -> int:
-        """FAIL/WARN sayına görə sadə 0-100 uyğunluq balı hesablayır."""
         if not findings:
             return 100
         penalty = 0
@@ -254,9 +285,6 @@ class WazuhAuditor:
                 penalty += 5
         return max(0, 100 - penalty)
 
-    # ------------------------------------------------------------------
-    # 3) Birləşdirilmiş audit xülasəsi (istəyə görə PDF/Dashboard-a bağlana bilər)
-    # ------------------------------------------------------------------
     def build_audit_summary(self, df: pd.DataFrame, resolved_users: set = None) -> dict:
         findings = self.run_compliance_checks(df, resolved_users)
         return {
@@ -271,7 +299,6 @@ class WazuhAuditor:
 
 
 if __name__ == "__main__":
-    # Sadə mənual test: Wazuh-dan son 10 hadisəni çəkib göstərir.
     auditor = WazuhAuditor()
     ok, result = auditor.fetch_alerts(size=10)
     if ok:

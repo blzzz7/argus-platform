@@ -37,53 +37,62 @@ def _get(name: str, default: str = None, required: bool = False) -> str:
 
 
 # ----------------------------------------------------------------------
-# Wazuh SIEM Bağlantısı
+# Wazuh SIEM Bağlantısı (YALNIZ audit-trail OXUMASI üçün — wazuh_auditor.py)
 # ----------------------------------------------------------------------
-# DƏYİŞİKLİK (KÖK SƏBƏB DÜZƏLİŞİ): Argus artıq hadisələri BİRBAŞA
-# OpenSearch-in "_doc" endpoint-inə YAZMIR (bax: app_ui.py -> send_to_wazuh()).
-# Səbəb: özəl "argus-itdr-events" indeksinə birbaşa yazılan sənədlər Wazuh
-# qaydalarından (rules) keçmir, ona görə Dashboard-un Overview / Threat
-# Hunting ekranlarında (bunlar "wazuh-alerts-*" indeksinə baxır) HEÇ VAXT
-# görünmürdü — loqlar "getmirdi" kimi görünməsinin əsl səbəbi bu idi.
-#
-# İndi hadisələr lokal NDJSON fayla yazılır (aşağıda ARGUS_LOG_DIR),
-# Wazuh manager onu <localfile> ilə tail edir, local_rules.xml-dəki
-# qaydalardan keçirir və nəticəni əsl "wazuh-alerts-*" indeksinə salır.
-#
-# WAZUH_ENDPOINT / WAZUH_USER / WAZUH_PASSWORD / WAZUH_VERIFY_SSL indi
-# YALNIZ `wazuh_auditor.py`-nin audit-trail OXUMASI üçün istifadə olunur
-# (Wazuh Indexer-dən _search API-si ilə geri oxumaq üçün).
+# DİQQƏT (KÖK SƏBƏB): bu dəyişənlər artıq hadisə YAZMAQ üçün İSTİFADƏ
+# OLUNMUR (bax aşağıda "ARGUS INGEST BRIDGE" bölməsi). Onlar yalnız
+# wazuh_auditor.py-nin Wazuh Indexer-dən _search API-si ilə geri oxuması
+# üçün lazımdır (Audit Trail).
 WAZUH_ENDPOINT = _get("WAZUH_ENDPOINT", "https://localhost:9200/argus-itdr-events/_doc")
 
-# Qeyd (DÜZƏLİŞ): .env-də tarixən həm WAZUH_USER, həm də WAZUH_USERNAME
-# adı işlədilib. Əvvəlki kod yalnız WAZUH_USER-i oxuyurdu, ona görə
-# .env-də WAZUH_USERNAME yazılanda bu SƏSSİZCƏ default "admin"-ə düşürdü
-# (təsadüfən doğru qiymətlə üst-üstə düşdüyü üçün bug görünməz qalmışdı).
-# İndi ikisi də qəbul olunur.
+# Qeyd: .env-də tarixən həm WAZUH_USER, həm də WAZUH_USERNAME işlədilib —
+# ikisi də qəbul olunur.
 WAZUH_USER = _get("WAZUH_USER") or _get("WAZUH_USERNAME", "admin")
-WAZUH_PASSWORD = _get("WAZUH_PASSWORD", "")  # boşdursa audit oxuması xəbərdarlıq edəcək
+WAZUH_PASSWORD = _get("WAZUH_PASSWORD", "")
 WAZUH_VERIFY_SSL = _get("WAZUH_VERIFY_SSL", "true").strip().lower() == "true"
 
-# Audit-trail (WazuhAuditor) hansı indeksi/indeks pattern-ini oxumalıdır.
-# local_rules.xml-dəki qaydalar group="argus,itdr," ilə işarələnib,
-# auditor bunu filtr kimi istifadə edir.
+# Audit-trail (WazuhAuditor) HANSI indeksi oxumalıdır. KÖK SƏBƏB DÜZƏLİŞİ:
+# əvvəllər auditor bunun əvəzinə WAZUH_ENDPOINT-dən (argus-itdr-events)
+# index adı çıxarırdı — bu indeks isə artıq heç vaxt yazılmır, ona görə
+# audit oxuması həmişə boş qayıdırdı. Əsl alert-lər local_rules.xml-dən
+# keçib bu pattern-ə (wazuh-alerts-*) düşür.
 WAZUH_ALERTS_INDEX = _get("WAZUH_ALERTS_INDEX", "wazuh-alerts-*")
 
+# Wazuh Indexer-in özünün bazası (ngrok və ya başqa reverse-proxy ünvanı ola
+# bilər). Audit oxuması bura qarşı _search sorğusu göndərir.
+WAZUH_INDEXER_BASE = _get("WAZUH_INDEXER_BASE", "https://localhost:9200")
+
 # ----------------------------------------------------------------------
-# Argus -> Wazuh manager lokal fayl körpüsü
+# ARGUS INGEST BRIDGE — Cloud (Streamlit Community Cloud) -> Ev şəbəkəsi
 # ----------------------------------------------------------------------
-# send_to_wazuh() hadisələri bu qovluqdakı NDJSON fayla yazır. Bu qovluq
-# docker-compose.yml-də wazuh.manager konteynerinin /var/log/argus
-# qovluğuna bind-mount edilməlidir (bax: WAZUH_SETUP.md).
+# KÖK SƏBƏB DÜZƏLİŞİ: Cloud-da işləyən tətbiq sizin evinizdəki fayl
+# sisteminə birbaşa YAZA BİLMƏZ (Cloud və ev tamam ayrı maşınlardır).
+# Əvvəlki `send_to_wazuh()` local fayla yazırdı — bu, lokalda düzgün
+# işləyir, amma Cloud-da yazılan fayl Cloud-un öz ötəri konteynerində
+# itib-gedirdi və Wazuh manager-ə HEÇ VAXT çatmırdı.
 #
-# DİQQƏT (Cloud portativlik qeydi): aşağıdakı default dəyər sizin öz Windows
-# kompüterinizə (`C:\\Users\\rkazi\\...`) sabitlənib. Bu lokal inkişaf üçün
-# problemsizdir, AMMA Streamlit Community Cloud-da (Linux mühiti) bu yol
-# mövcud olmayacaq və fayla yazma cəhdi xəta verəcək. Cloud-a deploy edərkən
-# Secrets-də `ARGUS_LOG_DIR` üçün Linux-uyğun bir yol təyin edin
-# (məs. "/tmp/argus-logs" — Cloud-da Wazuh manager-in özü işləmədiyi üçün
-# bu, sadəcə yazma xətası almamaq məqsədi daşıyır; real Wazuh inteqrasiyası
-# yalnız Wazuh manager-in əlçatan olduğu mühitdə mənalıdır).
+# Həll: evinizdə kiçik bir "ingest bridge" HTTP servisi işə salıb (bax:
+# receiver.py) onu ngrok ilə tunelləyirik. Cloud hadisələri BU URL-ə POST
+# edir, bridge də onları Wazuh manager-in artıq tail etdiyi lokal NDJSON
+# fayla yazır.
+#
+# ARGUS_INGEST_URL boş olarsa (default lokal development), send_to_wazuh()
+# köhnə davranışa (birbaşa lokal fayla yazmaq) geri qayıdır — beləliklə
+# eyni kod həm lokalda (Wazuh evinizdədirsə), həm Cloud-da (bridge
+# quraşdırılıbsa) işləyir.
+ARGUS_INGEST_URL = _get("ARGUS_INGEST_URL", "")  # məs. https://xxxx.ngrok-free.dev/ingest
+ARGUS_INGEST_TOKEN = _get("ARGUS_INGEST_TOKEN", "")  # receiver.py ilə paylaşılan gizli açar
+
+# ----------------------------------------------------------------------
+# Argus -> Wazuh manager LOKAL fayl körpüsü (yalnız bridge/lokal tərəfdə)
+# ----------------------------------------------------------------------
+# Bu qovluq docker-compose.yml-də wazuh.manager konteynerinin
+# /var/log/argus qovluğuna bind-mount edilməlidir.
+#
+# DİQQƏT: aşağıdakı default Windows yoludur (yalnız lokal inkişaf üçün
+# məna kəsb edir). Cloud-da BU DƏYİŞƏN İSTİFADƏ OLUNMUR (yuxarıdakı
+# ARGUS_INGEST_URL bridge-i əvəz edir) — yalnız receiver.py-ni işə
+# saldığınız EV kompüterində lazımdır.
 ARGUS_LOG_DIR = _get("ARGUS_LOG_DIR", r"C:\Users\rkazi\wazuh-docker\single-node\argus-logs")
 ARGUS_LOG_FILENAME = _get("ARGUS_LOG_FILENAME", "itdr-events.json")
 
@@ -97,24 +106,11 @@ DOMAIN = _get("ARGUS_DOMAIN", "")
 
 AUTHORITY = f"https://login.microsoftonline.com/{TENANT_ID}" if TENANT_ID else None
 
-# YENİ: Cloud-da test istifadəçi/şifrə cütlüklərini TƏHLÜKƏSİZ şəkildə saxlamaq
-# üçün (bax: modules/attack_engine.py -> _load_test_identities()). Streamlit
-# Cloud secrets.toml-da çox sətirli string kimi verilə bilər:
-#
-#   ARGUS_TEST_IDENTITIES_JSON = """
-#   {"domain": "yourtenant.onmicrosoft.com",
-#    "credentials": {"victimuser@yourtenant.onmicrosoft.com": "RealTestPass123!"}}
-#   """
-#
-# Boşdursa, attack_engine.py lokal data/test_identities.json faylına enir.
 TEST_IDENTITIES_JSON = _get("ARGUS_TEST_IDENTITIES_JSON", "")
 
 # ----------------------------------------------------------------------
 # Feature Flags
 # ----------------------------------------------------------------------
-# True olduqda "Execute AI Remediation" düyməsi HƏQİQİ Graph API çağırışı ilə
-# istifadəçinin sessiyalarını ləğv edir və hesabı deaktiv edir.
-# False (default) olduqda proqram yalnız SİMULYASİYA edir və bunu UI-da açıq bildirir.
 ENABLE_REAL_REMEDIATION = _get("ENABLE_REAL_REMEDIATION", "false").strip().lower() == "true"
 
 
@@ -126,9 +122,14 @@ def has_graph_credentials() -> bool:
 # ----------------------------------------------------------------------
 # AI / Sigma Rule Generator (ai_generator.py üçün)
 # ----------------------------------------------------------------------
-# "local" -> lokal Ollama, "cloud" -> OpenAI API
 AI_MODE = _get("AI_MODE", "local").strip().lower()
 OPENAI_API_KEY = _get("OPENAI_API_KEY")
 OPENAI_MODEL = _get("OPENAI_MODEL", "gpt-4o-mini")
 OLLAMA_MODEL = _get("OLLAMA_MODEL", "llama3")
 OLLAMA_HOST = _get("OLLAMA_HOST", "http://127.0.0.1:11434")
+
+# Groq / OpenAI-uyğun endpoint dəstəyi (Streamlit Cloud secrets-də
+# AI_MODE="groq" göstərilibsə istifadə olunur).
+LLM_BASE_URL = _get("LLM_BASE_URL", "")
+LLM_API_KEY = _get("LLM_API_KEY", "")
+LLM_MODEL = _get("LLM_MODEL", "")
