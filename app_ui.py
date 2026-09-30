@@ -156,6 +156,17 @@ def ensure_timestamp_column(df: pd.DataFrame) -> pd.DataFrame:
         cols_order = ["Timestamp"] + [c for c in display_df.columns if c != "Timestamp"]
         display_df = display_df[cols_order]
 
+    # KÖK SƏBƏB DÜZƏLİŞİ (pyarrow.lib.ArrowInvalid): EventID kimi sütunlar
+    # mənbəyə görə qarışıq tipli olur — Red Team Attack Controller-in
+    # yaratdığı hadisələrdə EventID int (4625), CSV-dən yüklənən köhnə
+    # sətirlərdə isə str ("4625") olur. pd.concat bunları "object" tipinə
+    # salır, qarışıq elementlərlə — Streamlit-in Arrow serializasiyası bunu
+    # emal edə bilmir və bütün cədvəl göstərilməyə çalışanda crash edir.
+    # Göstərim MƏQSƏDİ ilə bütün sütunları string-ə çeviririk (backend/
+    # session_state-dəki əsl data dəyişmir, çünki bu, hələ də bir KOPYA
+    # üzərində aparılır).
+    display_df = display_df.astype(str)
+
     return display_df
 
 
