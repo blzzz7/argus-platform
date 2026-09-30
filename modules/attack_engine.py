@@ -140,7 +140,8 @@ def fetch_tenant_users_from_graph(max_users: int = 200):
             body = resp.json()
             for u in body.get("value", []):
                 upn = u.get("userPrincipalName")
-                if upn and u.get("accountEnabled", True):
+                # YALNIZ aktiv VƏ daxili (#EXT# olmayan) real istifadəçilər siyahıya alınır:
+                if upn and u.get("accountEnabled", True) and "#EXT#" not in upn:
                     users.append(upn)
 
             url = body.get("@odata.nextLink")  # pagination
@@ -148,8 +149,7 @@ def fetch_tenant_users_from_graph(max_users: int = 200):
         return True, users[:max_users]
     except Exception as e:
         return False, f"Graph sorğu xətası: {e}"
-
-
+        
 def generate_wordlists(force_refresh: bool = True):
     """
     BUG FIX: əvvəllər `if not os.path.exists(...)` şərti ilə yalnız BİR DƏFƏ
