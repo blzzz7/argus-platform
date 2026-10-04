@@ -9,3 +9,5 @@ reportlab
 altair
 msal
 openai
+pysigma
+pysigma-backend-wazuh
