@@ -5,18 +5,31 @@ Argus ITDR-in HƏQİQİ "AI" komponenti.
 
 Aşkarlanan identity hadisəsini (məsələn, Password Spray və ya Brute Force
 nəticəsində yaranan DataFrame sətri) götürüb, LLM (lokal Ollama və ya
-bulud OpenAI) vasitəsilə real bir Sigma Detection Rule (YAML) generasiya edir
-və pySigma ilə validasiya edir.
+bulud — OpenAI, Groq, ya da hər hansı OpenAI-uyğun API) vasitəsilə real bir
+Sigma Detection Rule (YAML) generasiya edir və pySigma ilə validasiya edir.
 
 DİQQƏT: `sigma_rule.py`-dakı Sigma qaydası yalnız DETECTION üçündür (SIEM-ə
 əlavə ediləcək monitorinq qaydası) — heç bir hücum/exploit əməliyyatı etmir.
 
+KÖK SƏBƏB DÜZƏLİŞİ (bu versiyada): əvvəlki `AIServiceSwitcher.__init__`
+yalnız `mode == "local"` və `mode == "cloud"`-u tanıyırdı — üçüncü hər hansı
+dəyər (məs. "groq") birbaşa `ValueError`-a düşürdü, baxmayaraq ki
+`config.py`-də artıq `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL` kimi
+Groq-uyğun dəyişənlər var idi. İndi "local" xaricindəki HƏR rejim (cloud,
+groq, openai, və s.) vahid "remote OpenAI-compatible" yolu ilə işlənir:
+Groq-un API-si OpenAI SDK-sı ilə tam uyğundur, sadəcə `base_url` dəyişir.
+
 Konfiqurasiya `.env`-dən gəlir (bax: modules/config.py):
-    AI_MODE=local            # və ya "cloud"
-    OLLAMA_MODEL=llama3      # sizin `ollama list` çıxdınıza uyğun dəyişin
+    AI_MODE=local             # "local" = Ollama; hər başqa dəyər (cloud/groq/openai/...) = remote
+    OLLAMA_MODEL=llama3       # yalnız local rejimdə
     OLLAMA_HOST=http://localhost:11434
-    OPENAI_API_KEY=...       # yalnız AI_MODE=cloud olduqda lazımdır
-    OPENAI_MODEL=gpt-4o-mini
+
+    # Remote rejimlər (cloud/groq/openai/...) üçün — LLM_* dəyişənləri
+    # prioritetlidir, mövcud deyilsə OPENAI_* dəyişənlərinə fallback edir:
+    LLM_BASE_URL=https://api.groq.com/openai/v1   # Groq üçün; boş qalsa rəsmi OpenAI endpoint-i işlənir
+    LLM_API_KEY=gsk_...
+    LLM_MODEL=llama-3.3-70b-versatile
+    # (və ya köhnə adlarla): OPENAI_API_KEY=... / OPENAI_MODEL=gpt-4o-mini
 """
 import json
 import re
@@ -34,6 +47,9 @@ try:
 except ImportError:
     _OLLAMA_AVAILABLE = False
 
+# Groq, OpenAI, və hər hansı OpenAI-uyğun endpoint eyni `openai` SDK-sı ilə
+# işlənir — yalnız `base_url` dəyişir, ona görə ayrıca "groq" kitabxanası
+# lazım deyil.
 _OPENAI_AVAILABLE = True
 try:
     from openai import OpenAI
@@ -129,8 +145,6 @@ def _detection_is_valid(detection) -> bool:
     - içində string tipli 'condition' sahəsi olsun,
     - ən azı bir selector (məs. 'selection') olsun,
     - 'condition' o selector-un adına istinad etsin (məs. "selection", "selection1 or selection2").
-    Modelin `condition: and` kimi Sigma-ya uyğun olmayan qeyri-referens dəyər
-    yazdığı hallar (məhz Şəkil 1-dəki bug) bununla aşkarlanıb təmizlənir.
     """
     if not isinstance(detection, dict):
         return False
@@ -150,9 +164,6 @@ def _sanitize_sigma_yaml(yaml_text: str, entra_json_log: dict) -> str:
     etdiyi sahələri (title, logsource, detection/condition) yoxdursa avtomatik
     doldurur ki, validasiyanın uğursuz olması tamamilə modelin keyfiyyətindən
     asılı olmasın.
-
-    Nəticə hər zaman parse oluna bilən YAML-dır (sanitizasiya alınmasa belə,
-    orijinal mətni olduğu kimi qaytarır ki, heç olmasa xəta mesajı görünsün).
     """
     if not _YAML_AVAILABLE:
         return yaml_text
@@ -165,13 +176,11 @@ def _sanitize_sigma_yaml(yaml_text: str, entra_json_log: dict) -> str:
     if not isinstance(data, dict):
         data = {}
 
-    # Bəzi modellər hər şeyi "rule:" açarı altında yerləşdirir — əsas dict-ə köçürürük
     nested_rule = data.pop("rule", None)
     if isinstance(nested_rule, dict):
         for k, v in nested_rule.items():
             data.setdefault(k, v)
 
-    # Bəzi modellər "output:" bloku yaradır — Sigma-da mövcud deyil, sadəcə atırıq
     data.pop("output", None)
 
     event_id = entra_json_log.get("eventId")
@@ -182,7 +191,6 @@ def _sanitize_sigma_yaml(yaml_text: str, entra_json_log: dict) -> str:
         f"Auto-Generated Detection — EventID {event_id} on {target_user}"
     )
 
-    # id mövcud deyilsə və ya UUID formatında deyilsə, yenisini yarat
     existing_id = data.get("id")
     valid_uuid = False
     if isinstance(existing_id, str):
@@ -215,8 +223,6 @@ def _sanitize_sigma_yaml(yaml_text: str, entra_json_log: dict) -> str:
 
     data.setdefault("level", "high")
 
-    # Yalnız rəsmi Sigma sahələrini saxla — LLM-in yaratdığı bütün qeyri-standart
-    # top-level açarlar (məs. "when", "output") burada təmizlənir.
     data = {k: v for k, v in data.items() if k in _ALLOWED_SIGMA_KEYS}
 
     try:
@@ -227,29 +233,57 @@ def _sanitize_sigma_yaml(yaml_text: str, entra_json_log: dict) -> str:
 
 class AIServiceSwitcher:
     """
-    Cloud (OpenAI) və Local (Ollama) rejimləri arasında keçid edən
-    Sigma Rule generator. Rejim `.env`-dəki AI_MODE ilə təyin olunur,
-    amma konstruktorda override edilə bilər.
+    "local" (Ollama) və "remote" (OpenAI-uyğun hər hansı API — OpenAI, Groq,
+    Together, Azure OpenAI və s.) arasında keçid edən Sigma Rule generator.
+
+    KÖK SƏBƏB DÜZƏLİŞİ: əvvəllər YALNIZ `mode in ("local", "cloud")` qəbul
+    olunurdu. İndi `mode == "local"` xaricindəki İSTƏNİLƏN dəyər (cloud,
+    groq, openai, ...) vahid "remote" yolu ilə işlənir — bu, `config.py`-dəki
+    `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL` dəyişənlərini (mövcud
+    deyilsə `OPENAI_API_KEY` / `OPENAI_MODEL`-ə fallback edərək) istifadə
+    edir. `base_url` təyin olunubsa (məs. Groq üçün
+    "https://api.groq.com/openai/v1"), ora qoşulur; boş qalsa rəsmi OpenAI
+    endpoint-i işlənir.
     """
 
     def __init__(self, mode: str = None, openai_api_key: str = None):
         self.mode = (mode or config.AI_MODE).strip().lower()
+        self._remote = False
 
-        if self.mode == "cloud":
-            if not _OPENAI_AVAILABLE:
-                raise RuntimeError("`openai` paketi quraşdırılmayıb: pip install openai")
-            key = openai_api_key or config.OPENAI_API_KEY
-            if not key:
-                raise ValueError("Cloud rejimi üçün OPENAI_API_KEY (.env-də) tələb olunur.")
-            self.client = OpenAI(api_key=key)
-        elif self.mode == "local":
+        if self.mode == "local":
             if not _OLLAMA_AVAILABLE:
                 raise RuntimeError("`ollama` paketi quraşdırılmayıb: pip install ollama")
             # ollama python client-i OLLAMA_HOST mühit dəyişənini özü oxuyur,
             # amma explicit Client yaradaraq host-u təmin edirik:
             self.client = ollama.Client(host=config.OLLAMA_HOST)
-        else:
-            raise ValueError(f"Keçərsiz AI_MODE: '{self.mode}'. Yalnız 'local' və ya 'cloud' ola bilər.")
+            self.model = config.OLLAMA_MODEL
+            return
+
+        # --- Remote rejim: "cloud", "groq", "openai" və s. HAMISI bura düşür ---
+        self._remote = True
+
+        if not _OPENAI_AVAILABLE:
+            raise RuntimeError("`openai` paketi quraşdırılmayıb: pip install openai")
+
+        base_url = (config.LLM_BASE_URL or "").strip() or None
+        key = (
+            openai_api_key
+            or (config.LLM_API_KEY or "").strip()
+            or (config.OPENAI_API_KEY or "").strip()
+        )
+        self.model = (config.LLM_MODEL or "").strip() or config.OPENAI_MODEL
+
+        if not key:
+            raise ValueError(
+                f"'{self.mode}' rejimi üçün API açarı tapılmadı. "
+                f".env-də (yaxud Streamlit Cloud Secrets-də) LLM_API_KEY "
+                f"(və ya OPENAI_API_KEY) dəyişənini təyin edin."
+            )
+
+        client_kwargs = {"api_key": key}
+        if base_url:
+            client_kwargs["base_url"] = base_url
+        self.client = OpenAI(**client_kwargs)
 
     def generate_sigma_rule(self, entra_json_log: dict):
         """
@@ -258,9 +292,11 @@ class AIServiceSwitcher:
         prompt = _build_prompt(entra_json_log)
 
         try:
-            if self.mode == "cloud":
+            if self._remote:
+                # Groq, OpenAI və hər hansı OpenAI-uyğun endpoint eyni
+                # chat.completions.create() çağırışı ilə işləyir.
                 response = self.client.chat.completions.create(
-                    model=config.OPENAI_MODEL,
+                    model=self.model,
                     messages=[
                         {"role": "system", "content": _SYSTEM_PROMPT},
                         {"role": "user", "content": prompt},
@@ -271,7 +307,7 @@ class AIServiceSwitcher:
 
             else:  # local (Ollama)
                 response = self.client.chat(
-                    model=config.OLLAMA_MODEL,
+                    model=self.model,
                     messages=[
                         {"role": "system", "content": _SYSTEM_PROMPT},
                         {"role": "user", "content": prompt},
@@ -281,9 +317,13 @@ class AIServiceSwitcher:
 
         except Exception as e:
             hint = ""
-            if self.mode == "local":
-                hint = (f" ('{config.OLLAMA_MODEL}' modelinin yükləndiyini yoxlayın: "
-                        f"`ollama pull {config.OLLAMA_MODEL}`, Ollama-nın işlədiyini yoxlayın: `ollama list`)")
+            if not self._remote:
+                hint = (f" ('{self.model}' modelinin yükləndiyini yoxlayın: "
+                        f"`ollama pull {self.model}`, Ollama-nın işlədiyini yoxlayın: `ollama list`)")
+            else:
+                hint = (f" (rejim: '{self.mode}', model: '{self.model}' — "
+                        f"LLM_BASE_URL/LLM_API_KEY/LLM_MODEL dəyərlərini və API açarının "
+                        f"etibarlılığını yoxlayın)")
             return False, f"LLM çağırışı uğursuz oldu: {e}{hint}"
 
         cleaned = _strip_markdown_fences(raw)
