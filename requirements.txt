@@ -8,3 +8,4 @@ plotly
 reportlab
 altair
 msal
+openai
