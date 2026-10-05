@@ -35,6 +35,14 @@ Bu fayl Claude Code üçün layihə kontekstidir.
 
 ## Sessiya jurnalı
 
+### 2026-10-05 (9)
+- **`modules/attack_engine.py` bərpa olundu** (`git restore` — fayl heç vaxt GitHub-dan silinməmişdi, istifadəçi onu yalnız lokal working tree-də klonladıqdan sonra silmişdi). HEAD ilə eynidir, heç bir diff yoxdur.
+- **Real doğrulama (yazma/hücum əməliyyatı İŞƏ SALINMADAN, yalnız oxu):** `generate_wordlists()` canlı Microsoft Graph sorğusu ilə işlədi → tenant-dan **15 real istifadəçi** tapıldı; `IdentityAttackEngine` düzgün instansiasiya oldu (163 user, 9 password, `msal.PublicClientApplication` obyekti). Faza 5-də yazılan kontrakt sənədləşməsi real fayl ilə **tam üst-üstə düşdü** — heç bir uyğunsuzluq yoxdur.
+- Tam reqressiya (landing + bütün 9 tab, real attack_engine ilə) → 0 xəta, Red Team tab-ında bütün "Launch" düymələri aktiv, "15 real istifadəçi tapıldı" statusu göstərilir.
+- **Nəticə — istifadəçinin sualına cavab:** Entra ID/cloud-identity strukturunda heç bir problem yoxdur, `attack_engine.py` ↔ `app_ui.py` kontraktı tam işlək və canlı tenant-la test edilib.
+- **GitHub-a push edildi** (`62bc28d`, branch `main`): bu sessiyanın bütün dəyişiklikləri (Faza 1-5 + AI chatbot) tək commit-də. `modules/attack_engine.py` toxunulmadan saxlanıldı və push-dan sonra remote-da olduğu yoxlanıldı (`git ls-tree origin/main`).
+- **Açıq (istifadəçinin özü etməli, yalnız bu qalır):** Streamlit Cloud → Secrets-i yeniləmək (Supabase + düzəldilmiş `LLM_MODEL` + Entra/Wazuh/admin dəyərləri — tam blok aşağıda, söhbətdə verildi). Bundan sonra Cloud avtomatik redeploy edəcək (push artıq edildi).
+
 ### 2026-10-05 (8)
 - **AI Chatbot əlavə olundu** (istifadəçinin sonradan xatırladığı tələb): sidebar-da sabit "🤖 AI Köməkçi" paneli, Groq (`.env`-dəki `AI_MODE=groq`) ilə işləyir.
 - `modules/ai_generator.py`-ə `AIServiceSwitcher.chat()` metodu əlavə olundu (mövcud `generate_sigma_rule()`/`validate_sigma_with_pysigma()`-ya TOXUNULMADI — eyni client/model-dən istifadə edir, sadəcə sərbəst söhbət üçün).
