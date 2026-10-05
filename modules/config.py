@@ -97,6 +97,18 @@ ARGUS_LOG_DIR = _get("ARGUS_LOG_DIR", r"C:\Users\rkazi\wazuh-docker\single-node\
 ARGUS_LOG_FILENAME = _get("ARGUS_LOG_FILENAME", "itdr-events.json")
 
 # ----------------------------------------------------------------------
+# Supabase (Postgres) — əsas data persistence qatı (bax: modules/db.py, storage.py)
+# ----------------------------------------------------------------------
+# KÖK SƏBƏB (2026-10-05): əvvəlki SQLite (`data/argus_events.db`) Streamlit
+# Community Cloud-un ötəri fayl sistemində hər restart-da itirdi. İndi
+# events/resolved_users/integrations Supabase-də (bulud Postgres) saxlanılır.
+#
+# SUPABASE_KEY üçün `service_role` key tövsiyə olunur — Streamlit server-side
+# işlədiyi üçün bu key brauzerə heç vaxt getmir (bax: modules/db.py).
+SUPABASE_URL = _get("SUPABASE_URL", "")
+SUPABASE_KEY = _get("SUPABASE_KEY", "")
+
+# ----------------------------------------------------------------------
 # Microsoft Entra ID / MSAL (Red Team Attack Engine üçün)
 # ----------------------------------------------------------------------
 TENANT_ID = _get("ARGUS_TENANT_ID")

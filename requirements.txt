@@ -10,3 +10,4 @@ altair
 msal
 openai
 pysigma
+supabase

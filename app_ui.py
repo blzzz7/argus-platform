@@ -18,10 +18,34 @@ from reportlab.lib import colors
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable
 
-from modules import config, storage
+from modules import config, storage, integrations
+from modules.db import is_configured as db_is_configured
 from modules.ai_generator import AIServiceSwitcher, row_to_entra_log
 
 # --- ATTACK ENGINE İNTEQRASİYASI ---
+# QEYD (Faza 5, 2026-10-05): `modules/attack_engine.py` working tree-dən
+# silinib (bax CLAUDE.md, "Açıq" bəndləri). Bu blok TOXUNULMADAN saxlanılıb
+# ki, fayl geri qoyulanda qalan kod (Red Team Attack Controller tab-ı)
+# DƏYİŞİKLİK TƏLƏB ETMƏSİN. Geri qoyulan fayl aşağıdakı KONTRAKTA uyğun
+# olmalıdır:
+#
+#   modules/attack_engine.py gözlənilən məzmun:
+#     - USERS_FILE, PASSWORDS_FILE: str (wordlist fayl yolları)
+#     - generate_wordlists() -> dict:
+#         {"graph_fetch_ok": bool, "real_user_count": int,
+#          "user_source": str, "graph_fetch_detail": str}
+#     - class IdentityAttackEngine(users_file, passwords_file):
+#         .users: list[str]
+#         .passwords: list[str]
+#         .public_app: MSAL PublicClientApplication-uyğun obyekt —
+#             .acquire_token_by_username_password(username, password, scopes) -> dict
+#             .initiate_device_flow(scopes) -> dict (uğurlu olduqda 'user_code' açarı olmalıdır)
+#         .revoke_sign_in_sessions(username) -> tuple[bool, str]
+#         .disable_account(username) -> tuple[bool, str]
+#
+# Fayl mövcud olmadıqda / kontrakta uyğun olmadıqda `attack_engine = None`
+# qalır, Red Team tab-ı bunu aşkarlayıb bütün hücum düymələrini disable
+# edir və aydın diaqnoz göstərir — tətbiq ÇÖKMÜR.
 attack_engine = None
 attack_engine_error = None
 wordlist_info = None
@@ -30,11 +54,26 @@ try:
 
     wordlist_info = generate_wordlists()
     attack_engine = IdentityAttackEngine(USERS_FILE, PASSWORDS_FILE)
+
+    # Müdafiəedici yoxlama: fayl geri qoyulanda kontrakta tam uyğun
+    # olmaya bilər (məs. metod adı fərqli yazılıb). Bunu İNDİ aşkarlayıb
+    # aydın mesaj vermək, bir hücum düyməsi basılanda dərində gizli
+    # AttributeError almaqdan DAHA YAXŞIDIR.
+    _required_attack_engine_attrs = ["users", "passwords", "public_app", "revoke_sign_in_sessions", "disable_account"]
+    _missing_attack_engine_attrs = [a for a in _required_attack_engine_attrs if not hasattr(attack_engine, a)]
+    if _missing_attack_engine_attrs:
+        raise RuntimeError(
+            "IdentityAttackEngine gözlənilən interfeysə uyğun deyil, əskik: "
+            + ", ".join(_missing_attack_engine_attrs)
+        )
 except ImportError as e:
+    attack_engine = None
     attack_engine_error = f"Modul import xətası: {e}"
 except RuntimeError as e:
+    attack_engine = None
     attack_engine_error = str(e)
 except Exception as e:
+    attack_engine = None
     attack_engine_error = f"Gözlənilməz xəta: {e}"
 # --------------------------------------------------------
 
@@ -70,9 +109,18 @@ def send_to_wazuh(payload):
       2) ARGUS_INGEST_URL boşdursa (tətbiq Wazuh ilə EYNİ maşında
          işləyir) -> köhnə davranış: birbaşa lokal fayla yazılır.
 
+    QEYD (Faza 4, 2026-10-05): URL/token indi həm `.env`-dən, həm də
+    ⚙️ Integrations tab-ında UI-dan təyin oluna bilər (bax:
+    modules/integrations.py). UI konfiqurasiya edilməyibsə, davranış
+    DƏYİŞMƏDƏN əvvəlki kimidir (yalnız `.env`).
+
     Qaytarır: (ok: bool, data: dict | str-xəta-mesajı)
     """
-    if config.ARGUS_INGEST_URL:
+    _wazuh_cfg = integrations.get_active_wazuh_config()
+    ingest_url = _wazuh_cfg["ingest_url"]
+    ingest_token = _wazuh_cfg["ingest_token"]
+
+    if ingest_url:
         try:
             headers = {
                 "Content-Type": "application/json",
@@ -80,11 +128,11 @@ def send_to_wazuh(payload):
                 # bu olmadan cavab HTML olur və JSON parse xətası yaranır.
                 "ngrok-skip-browser-warning": "true",
             }
-            if config.ARGUS_INGEST_TOKEN:
-                headers["X-Argus-Token"] = config.ARGUS_INGEST_TOKEN
+            if ingest_token:
+                headers["X-Argus-Token"] = ingest_token
 
             resp = requests.post(
-                config.ARGUS_INGEST_URL,
+                ingest_url,
                 headers=headers,
                 json=payload,
                 timeout=15,
@@ -350,6 +398,170 @@ def _init_auth_state():
     st.session_state.setdefault("lockout_until", 0.0)
 
 
+def render_landing_page():
+    """Login tələb etməyən ictimai giriş səhifəsi (`?page=landing`, default route).
+
+    MVP marketinq-tipli hero + xüsusiyyət kartları. Buradan ya birbaşa
+    tətbiqə (sərbəst naviqasiya, login olmadan baxış) ya da login
+    səhifəsinə keçid olunur.
+    """
+    st.markdown(
+        """
+        <style>
+        .stApp {
+            background: radial-gradient(circle at top, #111827 0%, #05070c 68%);
+        }
+        .argus-hero {
+            text-align: center;
+            padding: 3.5rem 1rem 2rem 1rem;
+        }
+        .argus-hero-badge {
+            display: inline-block;
+            padding: 0.25rem 0.75rem;
+            font-size: 0.75rem;
+            font-weight: 700;
+            letter-spacing: 0.6px;
+            color: #34d399;
+            background: rgba(52, 211, 153, 0.12);
+            border: 1px solid rgba(52, 211, 153, 0.35);
+            border-radius: 999px;
+            margin-bottom: 1.1rem;
+        }
+        .argus-hero-title {
+            font-size: 2.6rem;
+            font-weight: 800;
+            color: #e5e7eb;
+            line-height: 1.15;
+            margin-bottom: 0.7rem;
+        }
+        .argus-hero-subtitle {
+            font-size: 1.05rem;
+            color: #8a97ad;
+            max-width: 640px;
+            margin: 0 auto 2rem auto;
+            line-height: 1.55;
+        }
+        .argus-feature-card {
+            background: #0e1420;
+            border: 1px solid #1f2937;
+            border-radius: 14px;
+            padding: 1.4rem 1.3rem;
+            height: 100%;
+        }
+        .argus-feature-icon { font-size: 1.6rem; margin-bottom: 0.5rem; }
+        .argus-feature-title {
+            font-size: 1rem;
+            font-weight: 700;
+            color: #e5e7eb;
+            margin-bottom: 0.35rem;
+        }
+        .argus-feature-desc {
+            font-size: 0.85rem;
+            color: #7d8aa0;
+            line-height: 1.45;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.markdown(
+        """
+        <div class="argus-hero">
+            <div class="argus-hero-badge">● SOC ACTIVE</div>
+            <div class="argus-hero-title">🛡️ Argus ITDR</div>
+            <div class="argus-hero-subtitle">
+                Microsoft Entra ID üçün avtonom, AI əsaslı Identity Threat
+                Detection &amp; Response platforması. Hücumları canlı izləyin,
+                AI ilə Sigma qaydası generasiya edin, Wazuh SIEM-ə inteqrasiya
+                edin — hamısı bir panel üzərindən.
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    col_l, col_cta1, col_cta2, col_r = st.columns([2, 1.3, 1.3, 2])
+    with col_cta1:
+        if st.button("🚀 Tətbiqə keç", use_container_width=True, type="primary", key="landing_cta_app"):
+            st.query_params["page"] = "app"
+            st.rerun()
+    with col_cta2:
+        if st.button("🔐 Daxil ol", use_container_width=True, key="landing_cta_login"):
+            st.query_params["page"] = "login"
+            st.rerun()
+
+    st.caption(
+        "<div style='text-align:center; color:#5b6579; font-size:0.8rem; margin-top:0.3rem;'>"
+        "Tətbiqə baxmaq üçün giriş tələb olunmur — yalnız hücum/remediation/SIEM əməliyyatları üçün daxil olmalısınız."
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+    st.markdown("<div style='margin-top:2.5rem;'></div>", unsafe_allow_html=True)
+
+    features = [
+        ("📥", "Real-time Log Ingestion", "Entra ID sign-in log-larını (CSV və ya canlı) yükləyin, avtomatik risk təsnifatı alın."),
+        ("🤖", "AI Threat Analysis & Auto-Fix", "AI ilə Sigma qaydası generasiyası və remediation tövsiyələri — bir kliklə icra."),
+        ("⚔️", "Red Team Attack Controller", "MSAL/Graph əsaslı real hücum simulyasiyaları (brute force, spray, MFA fatigue)."),
+        ("⚙️", "SIEM Integration", "Wazuh və digər SIEM-lərə canlı dispatch — tam audit-trail ilə."),
+    ]
+    cols = st.columns(4)
+    for col, (icon, title, desc) in zip(cols, features):
+        with col:
+            st.markdown(
+                f"""
+                <div class="argus-feature-card">
+                    <div class="argus-feature-icon">{icon}</div>
+                    <div class="argus-feature-title">{title}</div>
+                    <div class="argus-feature-desc">{desc}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+    st.markdown("<div style='margin-top:2.8rem;'></div>", unsafe_allow_html=True)
+    st.markdown(
+        "<div style='text-align:center; font-size:1.1rem; font-weight:700; color:#e5e7eb; margin-bottom:1.1rem;'>"
+        "Necə işləyir?</div>",
+        unsafe_allow_html=True,
+    )
+    steps = [
+        ("1", "Qeydiyyatsız bax", "Bütün panellərə (Dashboard, Analytics, Audit Report və s.) sərbəst gəzin — giriş tələb olunmur."),
+        ("2", "Lazım olanda daxil ol", "Yalnız hücum/remediation/SIEM kimi real əməliyyat icra edəndə login formu açılır."),
+        ("3", "Əməliyyatı icra et", "Daxil olduqdan sonra bütün funksiyalar (Red Team, Auto-Fix, Wazuh dispatch) açılır."),
+    ]
+    step_cols = st.columns(3)
+    for col, (num, title, desc) in zip(step_cols, steps):
+        with col:
+            st.markdown(
+                f"""
+                <div class="argus-feature-card" style="text-align:center;">
+                    <div style="font-size:1.3rem; font-weight:800; color:#34d399; margin-bottom:0.3rem;">{num}</div>
+                    <div class="argus-feature-title">{title}</div>
+                    <div class="argus-feature-desc">{desc}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+
+def require_login(key: str, message: str = None) -> bool:
+    """Funksional (data-dəyişən / xarici sistemə göndərən) əməliyyatlar
+    üçün login qapısı. Səhifələrin özü AÇIQDIR (login tələb olunmur) —
+    yalnız bu funksiyanın çağırıldığı KONKRET əməliyyat (düymə) login
+    tələb edir. Login olunmayıbsa xəbərdarlıq + 'Daxil ol' düyməsi
+    göstərir (login səhifəsinə yönləndirir) və False qaytarır.
+    """
+    if st.session_state.get("authenticated"):
+        return True
+    st.warning(message or "🔐 Bu əməliyyatı icra etmək üçün daxil olmalısınız.")
+    if st.button("🔓 Daxil ol", key=f"login_gate_{key}"):
+        st.query_params["page"] = "login"
+        st.rerun()
+    return False
+
+
 def render_login_page():
     st.markdown(
         """
@@ -383,6 +595,9 @@ def render_login_page():
 
     col_l, col_center, col_r = st.columns([1, 1.15, 1])
     with col_center:
+        if st.button("⬅ Ana səhifə", key="login_back_to_landing"):
+            st.query_params["page"] = "landing"
+            st.rerun()
         st.markdown('<div class="argus-login-title">🛡️ Argus ITDR Platform Login</div>', unsafe_allow_html=True)
         st.markdown(
             '<div class="argus-login-subtitle">Identity Threat Detection &amp; Response — Restricted Access.<br>'
@@ -419,6 +634,7 @@ def render_login_page():
                     st.session_state["login_attempts"] = 0
                     st.session_state["lockout_until"] = 0.0
                     _log_login_event("UI_LOGIN_SUCCESS", username_input.strip())
+                    st.query_params["page"] = "app"
                     st.rerun()
                 else:
                     st.session_state["login_attempts"] += 1
@@ -437,21 +653,104 @@ def render_login_page():
         st.caption("🔐 SHA-256 hash-based authentication · Rate-limited · Audit-logged to Argus log bridge")
 
 
-def render_logout_sidebar():
+def render_account_sidebar():
+    """Sidebar-ın aşağı hissəsi. SƏRBƏST NAVİQASİYA MODELİ: istifadəçi
+    login olmadan da burada görünür (qonaq rejimi) — login yalnız
+    `require_login()` çağırılan konkret əməliyyatlarda tələb olunur.
+    """
     with st.sidebar:
         st.markdown("---")
-        st.markdown(f"👤 **{st.session_state.get('auth_username') or 'Admin'}**")
-        st.caption("🟢 Authenticated Session")
-        if st.button("🚪 Çıxış Et (Logout)", use_container_width=True):
-            _log_login_event("UI_LOGOUT", st.session_state.get("auth_username", "unknown"))
-            st.session_state["authenticated"] = False
-            st.session_state["auth_username"] = None
+        if st.session_state.get("authenticated"):
+            st.markdown(f"👤 **{st.session_state.get('auth_username') or 'Admin'}**")
+            st.caption("🟢 Authenticated Session")
+            if st.button("🚪 Çıxış Et (Logout)", use_container_width=True, key="sidebar_logout_btn"):
+                _log_login_event("UI_LOGOUT", st.session_state.get("auth_username", "unknown"))
+                st.session_state["authenticated"] = False
+                st.session_state["auth_username"] = None
+                st.rerun()
+        else:
+            st.caption("🔓 Qonaq rejimi — baxış sərbəstdir, əməliyyatlar üçün daxil olun.")
+            if st.button("🔐 Daxil ol", use_container_width=True, key="sidebar_login_btn"):
+                st.query_params["page"] = "login"
+                st.rerun()
+        if st.button("🏠 Ana səhifə", use_container_width=True, key="sidebar_landing_btn"):
+            st.query_params["page"] = "landing"
             st.rerun()
 
 
+_AI_CHAT_SYSTEM_PROMPT = (
+    "Sən Argus ITDR platformasının sidebar-dakı AI Köməkçisisən. Platforma "
+    "Microsoft Entra ID üçün identity threat detection & response (ITDR) "
+    "təklif edir: hadisə analizi, risk skorlaması, Sigma qaydası generasiyası, "
+    "Red Team hücum simulyasiyası, Wazuh SIEM inteqrasiyası. SOC analitikinə "
+    "qısa, dəqiq, praktiki cavablar ver (Azərbaycan dilində, istifadəçi başqa "
+    "dildə yazmayıbsa). Həssas məlumat (şifrə, token, API key) heç vaxt istəmə "
+    "və təkrar etmə."
+)
+
+
+def render_ai_chatbot_sidebar():
+    """Səhifənin qırağında (sidebar) sabit AI Köməkçi paneli.
+
+    `.env`-dəki `AI_MODE` (məs. "groq") ilə işləyir — eyni `AIServiceSwitcher`
+    (bax modules/ai_generator.py), yalnız Sigma qaydası yox, sərbəst söhbət
+    üçün `chat()` metodu çağırılır. Xarici API çağırdığı üçün FUNKSİONAL
+    əməliyyat sayılır -> `require_login()` ilə eyni Faza 2+3 modelinə görə
+    qorunur (baxış yox, bu panel bütünlüklə login tələb edir).
+    """
+    with st.sidebar:
+        st.markdown("---")
+        with st.expander("🤖 AI Köməkçi", expanded=False):
+            if not st.session_state.get("authenticated"):
+                st.caption("🔐 AI Köməkçidən istifadə üçün daxil olmalısınız.")
+                if st.button("🔓 Daxil ol", use_container_width=True, key="login_gate_ai_chat"):
+                    st.query_params["page"] = "login"
+                    st.rerun()
+                return
+
+            st.session_state.setdefault("ai_chat_history", [])
+
+            for msg in st.session_state["ai_chat_history"]:
+                with st.chat_message(msg["role"]):
+                    st.markdown(msg["content"])
+
+            user_msg = st.chat_input("Sualını yaz...", key="ai_chat_input")
+            if user_msg:
+                st.session_state["ai_chat_history"].append({"role": "user", "content": user_msg})
+                try:
+                    engine_ai = AIServiceSwitcher()
+                    ok, reply = engine_ai.chat(st.session_state["ai_chat_history"], system_prompt=_AI_CHAT_SYSTEM_PROMPT)
+                    reply_text = reply if ok else f"⚠️ {reply}"
+                except Exception as e:
+                    reply_text = f"⚠️ AI Köməkçi xətası: {e}"
+                st.session_state["ai_chat_history"].append({"role": "assistant", "content": reply_text})
+                st.rerun()
+
+            if st.session_state["ai_chat_history"] and st.button("🗑️ Tarixçəni təmizlə", use_container_width=True, key="ai_chat_clear_btn"):
+                st.session_state["ai_chat_history"] = []
+                st.rerun()
+
+
+# ========================================================================
+# 🧭 ROUTER — Landing / Login / App
+# ========================================================================
+# KÖK SƏBƏB DƏYİŞİKLİYİ (2026-10-05, Faza 2+3): əvvəlki versiyada BÜTÜN
+# tətbiq login arxasında idi (`st.stop()` login olmayanda). İndi:
+#   - "landing" (default) -> ictimai marketinq səhifəsi, login YOXDUR.
+#   - "login"             -> ayrıca login səhifəsi.
+#   - "app" (və ya naməlum dəyər) -> əsas tətbiq (bütün tab-lar) LOGİN
+#     OLMADAN açıqdır — sərbəst naviqasiya. Yalnız data-dəyişən/xarici
+#     sistemə göndərən KONKRET əməliyyatlar (`require_login()` ilə
+#     qorunan düymələr) daxil olmağı tələb edir.
 _init_auth_state()
 
-if not st.session_state["authenticated"]:
+_argus_page = st.query_params.get("page", "landing")
+
+if _argus_page == "landing":
+    render_landing_page()
+    st.stop()
+
+if _argus_page == "login":
     render_login_page()
     st.stop()
 
@@ -549,6 +848,7 @@ MENU_OPTIONS = [
     "🎯 Threat Detection Engine",
     "⚙️ SIEM Integration Test",
     "📄 Security Audit Report",
+    "🔌 Integrations",
 ]
 
 st.sidebar.markdown('<div class="argus-sidebar-menu-label">NAVIGATION</div>', unsafe_allow_html=True)
@@ -559,7 +859,8 @@ selected_menu = st.sidebar.radio(
     key="argus_nav_menu",
 )
 
-render_logout_sidebar()
+render_account_sidebar()
+render_ai_chatbot_sidebar()
 # ========================================================================
 # 🔐 END AUTHENTICATION LAYER / END SIDEBAR NAVIGATION
 # ========================================================================
@@ -588,41 +889,43 @@ if selected_menu == "📥 Live Log Ingestion":
         st.write("")
         st.write("")
         if st.button("🧹 Clear / Reset Telemetry", help="Yaddaşdakı bütün event-ləri və remediation tarixçəsini təmizləyir."):
-            st.session_state['df'] = pd.DataFrame(columns=storage.EVENT_COLUMNS)
-            st.session_state['resolved_users'] = set()
+            if require_login(key="clear_telemetry", message="🔐 Telemetriyanı təmizləmək üçün daxil olmalısınız."):
+                st.session_state['df'] = pd.DataFrame(columns=storage.EVENT_COLUMNS)
+                st.session_state['resolved_users'] = set()
 
-            cleared_persisted = False
-            for fn_name in ("clear_events", "reset_events", "delete_all_events"):
-                fn = getattr(storage, fn_name, None)
-                if callable(fn):
-                    try:
-                        fn()
-                        cleared_persisted = True
-                        break
-                    except Exception:
-                        pass
-            for fn_name in ("clear_resolved_users", "reset_resolved_users"):
-                fn = getattr(storage, fn_name, None)
-                if callable(fn):
-                    try:
-                        fn()
-                    except Exception:
-                        pass
+                cleared_persisted = False
+                for fn_name in ("clear_events", "reset_events", "delete_all_events"):
+                    fn = getattr(storage, fn_name, None)
+                    if callable(fn):
+                        try:
+                            fn()
+                            cleared_persisted = True
+                            break
+                        except Exception:
+                            pass
+                for fn_name in ("clear_resolved_users", "reset_resolved_users"):
+                    fn = getattr(storage, fn_name, None)
+                    if callable(fn):
+                        try:
+                            fn()
+                        except Exception:
+                            pass
 
-            if cleared_persisted:
-                st.success("✅ Sessiya yaddaşı VƏ SQLite tarixçəsi təmizləndi.")
-            else:
-                st.warning("⚠️ Sessiya yaddaşı təmizləndi. `modules/storage.py`-də "
-                            "`clear_events()` funksiyası tapılmadığı üçün SQLite-dakı köhnə "
-                            "tarixçə səhifə yenilənəndə yenidən yüklənə bilər.")
-            st.rerun()
+                if cleared_persisted:
+                    st.success("✅ Sessiya yaddaşı VƏ Supabase tarixçəsi təmizləndi.")
+                else:
+                    st.warning("⚠️ Sessiya yaddaşı təmizləndi. `modules/storage.py`-də "
+                                "`clear_events()` funksiyası tapılmadığı üçün Supabase-dəki köhnə "
+                                "tarixçə səhifə yenilənəndə yenidən yüklənə bilər.")
+                st.rerun()
 
     if uploaded_file is not None:
-        df = pd.read_csv(uploaded_file)
-        st.session_state['df'] = df
-        storage.append_events(df)
-        st.subheader("Raw Identity Events")
-        st.dataframe(ensure_timestamp_column(df), use_container_width=True)
+        if require_login(key="csv_ingest", message="🔐 CSV log-larını yükləyib emal etmək üçün daxil olmalısınız."):
+            df = pd.read_csv(uploaded_file)
+            st.session_state['df'] = df
+            storage.append_events(df)
+            st.subheader("Raw Identity Events")
+            st.dataframe(ensure_timestamp_column(df), use_container_width=True)
     else:
         if not st.session_state['df'].empty:
             st.subheader("Current Telemetry Logs in Memory")
@@ -736,64 +1039,66 @@ elif selected_menu == "🤖 AI Threat Analysis & Auto-Fix":
 
                         with col_a:
                             if st.button(f"🚫 Execute Remediation ({user})", key=f"btn_ai_block_{idx}_{user}"):
-                                use_real = config.ENABLE_REAL_REMEDIATION and attack_engine is not None
+                                if require_login(key=f"remediate_{idx}_{user}", message="🔐 Remediation icra etmək üçün daxil olmalısınız."):
+                                    use_real = config.ENABLE_REAL_REMEDIATION and attack_engine is not None
 
-                                if use_real:
-                                    ok1, msg1 = attack_engine.revoke_sign_in_sessions(user)
-                                    ok2, msg2 = attack_engine.disable_account(user)
-                                    real_ok = ok1 and ok2
-                                    detail = f"{msg1} | {msg2}"
-                                    mode = "REAL"
-                                else:
-                                    real_ok = True
-                                    detail = "Simulation mode: no real Entra ID change was made."
-                                    mode = "SIMULATION"
+                                    if use_real:
+                                        ok1, msg1 = attack_engine.revoke_sign_in_sessions(user)
+                                        ok2, msg2 = attack_engine.disable_account(user)
+                                        real_ok = ok1 and ok2
+                                        detail = f"{msg1} | {msg2}"
+                                        mode = "REAL"
+                                    else:
+                                        real_ok = True
+                                        detail = "Simulation mode: no real Entra ID change was made."
+                                        mode = "SIMULATION"
 
-                                alert_payload = {
-                                    "timestamp": datetime.utcnow().isoformat() + "Z",
-                                    "event_type": "REMEDIATION_EXECUTION",
-                                    "target_user": user,
-                                    "source_ip": ip,
-                                    "risk_level": risk_level,
-                                    "action_taken": "ACCOUNT_DISABLED_ENTRA_ID" if mode == "REAL" else "SIMULATED_LOCKOUT",
-                                    "triggered_by": "Argus-Engine",
-                                    "status": "SUCCESS" if real_ok else "FAILED",
-                                    "detail": detail,
-                                    "mode": mode,
-                                }
-                                wazuh_ok, wazuh_detail = send_to_wazuh(alert_payload)
+                                    alert_payload = {
+                                        "timestamp": datetime.utcnow().isoformat() + "Z",
+                                        "event_type": "REMEDIATION_EXECUTION",
+                                        "target_user": user,
+                                        "source_ip": ip,
+                                        "risk_level": risk_level,
+                                        "action_taken": "ACCOUNT_DISABLED_ENTRA_ID" if mode == "REAL" else "SIMULATED_LOCKOUT",
+                                        "triggered_by": "Argus-Engine",
+                                        "status": "SUCCESS" if real_ok else "FAILED",
+                                        "detail": detail,
+                                        "mode": mode,
+                                    }
+                                    wazuh_ok, wazuh_detail = send_to_wazuh(alert_payload)
 
-                                if real_ok:
-                                    st.session_state['resolved_users'].add(user)
-                                    storage.add_resolved_user(user)
-                                    st.success(f"✅ [{mode}] {detail}")
-                                else:
-                                    st.error(f"❌ [{mode}] {detail}")
+                                    if real_ok:
+                                        st.session_state['resolved_users'].add(user)
+                                        storage.add_resolved_user(user)
+                                        st.success(f"✅ [{mode}] {detail}")
+                                    else:
+                                        st.error(f"❌ [{mode}] {detail}")
 
-                                if wazuh_ok:
-                                    st.caption("📡 Remediation event Wazuh-a uğurla göndərildi.")
-                                else:
-                                    st.warning(f"⚠️ Remediation event Wazuh-a GÖNDƏRİLMƏDİ: {wazuh_detail}")
-                                st.rerun()
+                                    if wazuh_ok:
+                                        st.caption("📡 Remediation event Wazuh-a uğurla göndərildi.")
+                                    else:
+                                        st.warning(f"⚠️ Remediation event Wazuh-a GÖNDƏRİLMƏDİ: {wazuh_detail}")
+                                    st.rerun()
 
                         with col_b:
                             if st.button(f"🧠 Generate Sigma Rule ({user})", key=f"btn_sigma_{idx}_{user}"):
-                                try:
-                                    with st.spinner("AI Sigma qaydası generasiya edir..."):
-                                        engine_ai = AIServiceSwitcher()
-                                        entra_log = row_to_entra_log(row.to_dict())
-                                        result = engine_ai.generate_and_validate(entra_log)
+                                if require_login(key=f"sigma_{idx}_{user}", message="🔐 AI Sigma qaydası generasiyası üçün daxil olmalısınız."):
+                                    try:
+                                        with st.spinner("AI Sigma qaydası generasiya edir..."):
+                                            engine_ai = AIServiceSwitcher()
+                                            entra_log = row_to_entra_log(row.to_dict())
+                                            result = engine_ai.generate_and_validate(entra_log)
 
-                                    if result["ok"]:
-                                        st.code(result["yaml"], language="yaml")
-                                        if result["valid_sigma"]:
-                                            st.success("✅ pySigma validasiyasından keçdi.")
+                                        if result["ok"]:
+                                            st.code(result["yaml"], language="yaml")
+                                            if result["valid_sigma"]:
+                                                st.success("✅ pySigma validasiyasından keçdi.")
+                                            else:
+                                                st.warning(f"⚠️ Sigma sintaksis xəbərdarlığı: {result['error']}")
                                         else:
-                                            st.warning(f"⚠️ Sigma sintaksis xəbərdarlığı: {result['error']}")
-                                    else:
-                                        st.error(f"❌ Generasiya alınmadı: {result['error']}")
-                                except Exception as e:
-                                    st.error(f"❌ AI Generator xətası: {e}")
+                                            st.error(f"❌ Generasiya alınmadı: {result['error']}")
+                                    except Exception as e:
+                                        st.error(f"❌ AI Generator xətası: {e}")
     else:
         st.warning("⚠️ No logs ingested or generated yet. Upload CSV or run Red Team Attack Simulation.")
 
@@ -803,12 +1108,24 @@ elif selected_menu == "⚔️ Red Team Attack Controller":
     st.caption("Execute MSAL authentication attacks against your own Microsoft Entra ID test tenant.")
 
     if attack_engine is None:
-        st.error(
-            "❌ Attack Engine yüklənmədi: "
-            f"{attack_engine_error or 'naməlum xəta'}\n\n"
+        st.error(f"❌ Attack Engine yüklənmədi: {attack_engine_error or 'naməlum xəta (modules/attack_engine.py tapılmadı)'}")
+        st.caption(
             "`.env` faylında `ARGUS_TENANT_ID`, `ARGUS_CLIENT_ID`, `ARGUS_CLIENT_SECRET` "
             "dəyərlərini doldurduğunuzdan əmin olun."
         )
+        with st.expander("ℹ️ `modules/attack_engine.py` geri qoyularkən tələb olunan interfeys"):
+            st.markdown(
+                "- `USERS_FILE`, `PASSWORDS_FILE` — str fayl yolları\n"
+                "- `generate_wordlists()` → `{graph_fetch_ok, real_user_count, user_source, graph_fetch_detail}`\n"
+                "- `class IdentityAttackEngine(users_file, passwords_file)`:\n"
+                "  - `.users`, `.passwords` (list)\n"
+                "  - `.public_app` — MSAL `PublicClientApplication`-uyğun: "
+                "`.acquire_token_by_username_password(username, password, scopes)`, `.initiate_device_flow(scopes)`\n"
+                "  - `.revoke_sign_in_sessions(username) -> (bool, str)`\n"
+                "  - `.disable_account(username) -> (bool, str)`\n\n"
+                "Bu interfeys tam saxlanılırsa, faylı `modules/` qovluğuna qoyan kimi "
+                "Red Team tab-ı başqa heç bir kod dəyişikliyi olmadan işə düşəcək."
+            )
 
     if wordlist_info:
         if wordlist_info["graph_fetch_ok"]:
@@ -822,8 +1139,10 @@ elif selected_menu == "⚔️ Red Team Attack Controller":
                 f"Graph sorğusu uğursuz oldu: {wordlist_info['graph_fetch_detail']}"
             )
 
-    if config.ARGUS_INGEST_URL:
-        st.caption(f"📡 Hadisələr Ingest Bridge üzərindən göndərilir: `{config.ARGUS_INGEST_URL}`")
+    _active_wazuh_cfg = integrations.get_active_wazuh_config()
+    if _active_wazuh_cfg["ingest_url"]:
+        _cfg_src_label = "⚙️ Integrations tab (UI)" if _active_wazuh_cfg["source"] == "ui" else ".env"
+        st.caption(f"📡 Hadisələr Ingest Bridge üzərindən göndərilir: `{_active_wazuh_cfg['ingest_url']}` (mənbə: {_cfg_src_label})")
     else:
         st.caption(
             f"📡 Hadisələr Wazuh manager-in tail etdiyi lokal fayla yazılır: `{_ARGUS_LOG_FILE}`. "
@@ -866,7 +1185,13 @@ elif selected_menu == "⚔️ Red Team Attack Controller":
             language="bash"
         )
 
-    if attack_engine is not None and (btn_enum or btn_spray or btn_brute or btn_mfa or btn_device):
+    _redteam_triggered = attack_engine is not None and (btn_enum or btn_spray or btn_brute or btn_mfa or btn_device)
+    if _redteam_triggered and not require_login(
+        key="redteam_attack", message="🔐 Red Team hücum simulyasiyasını icra etmək üçün daxil olmalısınız."
+    ):
+        _redteam_triggered = False
+
+    if _redteam_triggered:
         console_logs = []
         new_events = []
 
@@ -1245,30 +1570,31 @@ elif selected_menu == "🎯 Threat Detection Engine":
         st.dataframe(ensure_timestamp_column(df), use_container_width=True)
 
         if st.button("🚨 Dispatch All Threats to Wazuh SIEM"):
-            success_count = 0
-            fail_details = []
-            for idx, row in df.iterrows():
-                payload = {
-                    "timestamp": datetime.utcnow().isoformat() + "Z",
-                    "event_id": row.get("EventID", 4625),
-                    "user": row.get("TargetUserName", "unknown"),
-                    "source_ip": row.get("IpAddress", "127.0.0.1"),
-                    "rule_title": "Identity Anomaly Detected",
-                    "severity": "HIGH", "source": "Argus-ITDR"
-                }
-                status, detail = send_to_wazuh(payload)
-                if status:
-                    success_count += 1
-                else:
-                    fail_details.append(f"{payload['user']}: {detail}")
+            if require_login(key="dispatch_all_threats", message="🔐 Hadisələri Wazuh SIEM-ə göndərmək üçün daxil olmalısınız."):
+                success_count = 0
+                fail_details = []
+                for idx, row in df.iterrows():
+                    payload = {
+                        "timestamp": datetime.utcnow().isoformat() + "Z",
+                        "event_id": row.get("EventID", 4625),
+                        "user": row.get("TargetUserName", "unknown"),
+                        "source_ip": row.get("IpAddress", "127.0.0.1"),
+                        "rule_title": "Identity Anomaly Detected",
+                        "severity": "HIGH", "source": "Argus-ITDR"
+                    }
+                    status, detail = send_to_wazuh(payload)
+                    if status:
+                        success_count += 1
+                    else:
+                        fail_details.append(f"{payload['user']}: {detail}")
 
-            if not fail_details:
-                st.success(f"✅ Dispatched {success_count} events to the Argus log bridge!")
-            else:
-                st.error(f"⚠️ Dispatched {success_count}/{len(df)} events. {len(fail_details)} failed.")
-                with st.expander("🔎 Failure details"):
-                    for d in fail_details:
-                        st.code(d)
+                if not fail_details:
+                    st.success(f"✅ Dispatched {success_count} events to the Argus log bridge!")
+                else:
+                    st.error(f"⚠️ Dispatched {success_count}/{len(df)} events. {len(fail_details)} failed.")
+                    with st.expander("🔎 Failure details"):
+                        for d in fail_details:
+                            st.code(d)
     else:
         st.info("No threats to dispatch.")
 
@@ -1284,17 +1610,18 @@ elif selected_menu == "⚙️ SIEM Integration Test":
         severity = st.selectbox("Severity", ["LOW", "MEDIUM", "HIGH", "CRITICAL"], index=2)
 
     if st.button("Send Live Telemetry"):
-        test_payload = {
-            "timestamp": datetime.utcnow().isoformat() + "Z",
-            "user": target_user, "source_ip": source_ip,
-            "rule_title": event_type, "severity": severity, "source": "Argus-ITDR-ManualTest"
-        }
-        ok, res = send_to_wazuh(test_payload)
-        if ok:
-            st.success("✅ Log written to the Argus log bridge — check the Wazuh manager alerts to confirm ingestion.")
-            st.json(test_payload)
-        else:
-            st.error(f"❌ Failed: {res}")
+        if require_login(key="manual_telemetry", message="🔐 Manual telemetriya göndərmək üçün daxil olmalısınız."):
+            test_payload = {
+                "timestamp": datetime.utcnow().isoformat() + "Z",
+                "user": target_user, "source_ip": source_ip,
+                "rule_title": event_type, "severity": severity, "source": "Argus-ITDR-ManualTest"
+            }
+            ok, res = send_to_wazuh(test_payload)
+            if ok:
+                st.success("✅ Log written to the Argus log bridge — check the Wazuh manager alerts to confirm ingestion.")
+                st.json(test_payload)
+            else:
+                st.error(f"❌ Failed: {res}")
 
 # TAB 8: Security Audit Report Generator
 elif selected_menu == "📄 Security Audit Report":
@@ -1346,3 +1673,73 @@ elif selected_menu == "📄 Security Audit Report":
         )
     else:
         st.warning("⚠️ No simulation data or telemetry available to build a report. Run Red Team simulations or upload logs first.")
+
+# TAB 9: Integrations & SIEM Settings
+elif selected_menu == "🔌 Integrations":
+    st.header("🔌 Integrations & SIEM Settings")
+    st.caption(
+        "Wazuh (və gələcəkdə digər SIEM platformalarının) qoşulma parametrlərini "
+        "kod dəyişmədən, birbaşa buradan idarə edin. Baxış sərbəstdir, dəyişiklik üçün giriş tələb olunur."
+    )
+
+    if not db_is_configured():
+        st.error(
+            "❌ Supabase qoşulmayıb (`SUPABASE_URL`/`SUPABASE_KEY` boşdur) — "
+            "inteqrasiya konfiqurasiyası saxlanıla/oxuna bilmir."
+        )
+    else:
+        st.subheader("🛡️ Wazuh SIEM")
+
+        wazuh_row = integrations.get_integration(integrations.WAZUH_INTEGRATION_ID)
+        wazuh_cfg_saved = (wazuh_row or {}).get("config") or {}
+        wazuh_enabled_saved = bool((wazuh_row or {}).get("enabled", False))
+
+        active_wazuh = integrations.get_active_wazuh_config()
+        status_icon = "🟢" if active_wazuh["ingest_url"] else "🔴"
+        status_text = "Aktiv" if active_wazuh["ingest_url"] else "Konfiqurasiya edilməyib"
+        status_src = "⚙️ UI konfiqurasiyası" if active_wazuh["source"] == "ui" else ".env (fallback)"
+        st.info(f"{status_icon} **Status:** {status_text} — mənbə: {status_src}")
+
+        if not st.session_state.get("authenticated"):
+            st.warning("🔐 Konfiqurasiyanı dəyişmək üçün daxil olmalısınız. (Status yuxarıda hər kəsə açıqdır.)")
+            if st.button("🔓 Daxil ol", key="login_gate_integrations_wazuh"):
+                st.query_params["page"] = "login"
+                st.rerun()
+        else:
+            with st.form("wazuh_integration_form"):
+                wazuh_enabled_input = st.checkbox(
+                    "UI konfiqurasiyasını aktiv et (söndürülübsə `.env`-dəki dəyərlər istifadə olunur)",
+                    value=wazuh_enabled_saved,
+                )
+                wazuh_url_input = st.text_input(
+                    "Ingest Bridge URL",
+                    value=wazuh_cfg_saved.get("ingest_url", ""),
+                    placeholder="https://xxxx.ngrok-free.dev/ingest",
+                    help="Boş saxlasanız və ya aşağıdakı checkbox söndürülübsə, `.env`-dəki ARGUS_INGEST_URL istifadə olunur.",
+                )
+                wazuh_token_input = st.text_input(
+                    "Ingest Token (X-Argus-Token header-i)",
+                    value=wazuh_cfg_saved.get("ingest_token", ""),
+                    type="password",
+                    placeholder="(opsional)",
+                )
+                wazuh_submit = st.form_submit_button("💾 Saxla")
+
+                if wazuh_submit:
+                    ok, err = integrations.save_integration(
+                        integrations.WAZUH_INTEGRATION_ID,
+                        "Wazuh SIEM",
+                        {"ingest_url": wazuh_url_input.strip(), "ingest_token": wazuh_token_input.strip()},
+                        wazuh_enabled_input,
+                    )
+                    if ok:
+                        st.success("✅ Wazuh konfiqurasiyası saxlanıldı.")
+                        st.rerun()
+                    else:
+                        st.error(f"❌ Saxlanmadı: {err}")
+
+        st.markdown("---")
+        st.subheader("🧩 Digər SIEM Platformaları")
+        st.caption("Hazırda yalnız görünür — icra məntiqinə qoşulma gələcək fazada ediləcək.")
+        for planned in integrations.PLANNED_INTEGRATIONS:
+            st.markdown(f"- **{planned['name']}** — 🚧 Tezliklə")

@@ -330,6 +330,40 @@ class AIServiceSwitcher:
         cleaned = _sanitize_sigma_yaml(cleaned, entra_json_log)
         return True, cleaned
 
+    def chat(self, messages: list, system_prompt: str = None):
+        """
+        Ümumi məqsədli söhbət (Sigma qaydası YOX) — "🤖 AI Köməkçi" chatbot
+        üçün (Faza 5+, 2026-10-05). `generate_sigma_rule()`-dan fərqli olaraq
+        sərbəst mövzuda cavab verir, amma EYNİ client/model (`__init__`-də
+        artıq AI_MODE-a görə qurulub — local/Ollama və ya remote/Groq/OpenAI)
+        istifadə edir.
+
+        `messages`: [{"role": "user"|"assistant", "content": str}, ...] (tarixçə).
+
+        Qaytarır: (ok: bool, cavab_mətni_və_ya_xəta_mesajı: str)
+        """
+        full_messages = []
+        if system_prompt:
+            full_messages.append({"role": "system", "content": system_prompt})
+        full_messages.extend(messages)
+
+        try:
+            if self._remote:
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=full_messages,
+                    temperature=0.4,
+                )
+                return True, response.choices[0].message.content
+            else:  # local (Ollama)
+                response = self.client.chat(model=self.model, messages=full_messages)
+                return True, response["message"]["content"]
+        except Exception as e:
+            hint = (f" ('{self.model}' modelinin yükləndiyini yoxlayın: `ollama pull {self.model}`)"
+                    if not self._remote else
+                    f" (rejim: '{self.mode}', model: '{self.model}' — LLM_API_KEY/LLM_BASE_URL yoxlayın)")
+            return False, f"AI Köməkçi xətası: {e}{hint}"
+
     def validate_sigma_with_pysigma(self, yaml_content: str):
         """
         Qaytarır: (ok: bool, rule_or_error)
