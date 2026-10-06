@@ -135,5 +135,5 @@ The Red Team engine executes **real authentication attempts and account changes 
 ---
 
 <div align="center">
-<sub>Built by <a href="https://github.com/blzzz7">blzzz7</a></sub>
+<sub>Built by <a href="https://github.com/blzzz7">Rasul Kazimov, Huseyn Huseynov, Aydin Erebov, Ferid Abdullayev</a></sub>
 </div>
