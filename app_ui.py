@@ -1678,7 +1678,7 @@ elif selected_menu == "📄 Security Audit Report":
 elif selected_menu == "🔌 Integrations":
     st.header("🔌 Integrations & SIEM Settings")
     st.caption(
-        "Wazuh (və gələcəkdə digər SIEM platformalarının) qoşulma parametrlərini "
+        "SIEM platformaları və AI/LLM provayderlərinin qoşulma parametrlərini "
         "kod dəyişmədən, birbaşa buradan idarə edin. Baxış sərbəstdir, dəyişiklik üçün giriş tələb olunur."
     )
 
@@ -1688,58 +1688,396 @@ elif selected_menu == "🔌 Integrations":
             "inteqrasiya konfiqurasiyası saxlanıla/oxuna bilmir."
         )
     else:
-        st.subheader("🛡️ Wazuh SIEM")
+        _is_auth = st.session_state.get("authenticated", False)
 
-        wazuh_row = integrations.get_integration(integrations.WAZUH_INTEGRATION_ID)
-        wazuh_cfg_saved = (wazuh_row or {}).get("config") or {}
-        wazuh_enabled_saved = bool((wazuh_row or {}).get("enabled", False))
+        def _status_badge(enabled: bool, configured: bool, source_label: str = None) -> str:
+            if enabled and configured:
+                label = f"🟢 Aktiv" + (f" — mənbə: {source_label}" if source_label else "")
+            elif configured:
+                label = "🟡 Konfiqurasiya edilib, lakin söndürülüb"
+            else:
+                label = "🔴 Konfiqurasiya edilməyib"
+            return label
 
-        active_wazuh = integrations.get_active_wazuh_config()
-        status_icon = "🟢" if active_wazuh["ingest_url"] else "🔴"
-        status_text = "Aktiv" if active_wazuh["ingest_url"] else "Konfiqurasiya edilməyib"
-        status_src = "⚙️ UI konfiqurasiyası" if active_wazuh["source"] == "ui" else ".env (fallback)"
-        st.info(f"{status_icon} **Status:** {status_text} — mənbə: {status_src}")
+        siem_tab, ai_tab = st.tabs(["🛡️ SIEM İnteqrasiyaları", "🤖 AI & LLM Provider Integration"])
 
-        if not st.session_state.get("authenticated"):
-            st.warning("🔐 Konfiqurasiyanı dəyişmək üçün daxil olmalısınız. (Status yuxarıda hər kəsə açıqdır.)")
-            if st.button("🔓 Daxil ol", key="login_gate_integrations_wazuh"):
-                st.query_params["page"] = "login"
-                st.rerun()
-        else:
-            with st.form("wazuh_integration_form"):
-                wazuh_enabled_input = st.checkbox(
-                    "UI konfiqurasiyasını aktiv et (söndürülübsə `.env`-dəki dəyərlər istifadə olunur)",
-                    value=wazuh_enabled_saved,
-                )
-                wazuh_url_input = st.text_input(
-                    "Ingest Bridge URL",
-                    value=wazuh_cfg_saved.get("ingest_url", ""),
-                    placeholder="https://xxxx.ngrok-free.dev/ingest",
-                    help="Boş saxlasanız və ya aşağıdakı checkbox söndürülübsə, `.env`-dəki ARGUS_INGEST_URL istifadə olunur.",
-                )
-                wazuh_token_input = st.text_input(
-                    "Ingest Token (X-Argus-Token header-i)",
-                    value=wazuh_cfg_saved.get("ingest_token", ""),
-                    type="password",
-                    placeholder="(opsional)",
-                )
-                wazuh_submit = st.form_submit_button("💾 Saxla")
+        # ================================================================
+        # 🛡️ SIEM İNTEQRASİYALARI
+        # ================================================================
+        with siem_tab:
+            # ---- Wazuh SIEM (MƏNTİQ TOXUNULMAYIB — yalnız vizual olaraq kart içinə alınıb) ----
+            with st.container(border=True):
+                st.subheader("🛡️ Wazuh SIEM")
 
-                if wazuh_submit:
-                    ok, err = integrations.save_integration(
-                        integrations.WAZUH_INTEGRATION_ID,
-                        "Wazuh SIEM",
-                        {"ingest_url": wazuh_url_input.strip(), "ingest_token": wazuh_token_input.strip()},
-                        wazuh_enabled_input,
-                    )
-                    if ok:
-                        st.success("✅ Wazuh konfiqurasiyası saxlanıldı.")
+                wazuh_row = integrations.get_integration(integrations.WAZUH_INTEGRATION_ID)
+                wazuh_cfg_saved = (wazuh_row or {}).get("config") or {}
+                wazuh_enabled_saved = bool((wazuh_row or {}).get("enabled", False))
+
+                active_wazuh = integrations.get_active_wazuh_config()
+                status_icon = "🟢" if active_wazuh["ingest_url"] else "🔴"
+                status_text = "Aktiv" if active_wazuh["ingest_url"] else "Konfiqurasiya edilməyib"
+                status_src = "⚙️ UI konfiqurasiyası" if active_wazuh["source"] == "ui" else ".env (fallback)"
+                st.info(f"{status_icon} **Status:** {status_text} — mənbə: {status_src}")
+
+                if not _is_auth:
+                    st.warning("🔐 Konfiqurasiyanı dəyişmək üçün daxil olmalısınız. (Status yuxarıda hər kəsə açıqdır.)")
+                    if st.button("🔓 Daxil ol", key="login_gate_integrations_wazuh"):
+                        st.query_params["page"] = "login"
                         st.rerun()
-                    else:
-                        st.error(f"❌ Saxlanmadı: {err}")
+                else:
+                    with st.form("wazuh_integration_form"):
+                        wazuh_enabled_input = st.checkbox(
+                            "UI konfiqurasiyasını aktiv et (söndürülübsə `.env`-dəki dəyərlər istifadə olunur)",
+                            value=wazuh_enabled_saved,
+                        )
+                        wazuh_url_input = st.text_input(
+                            "Ingest Bridge URL",
+                            value=wazuh_cfg_saved.get("ingest_url", ""),
+                            placeholder="https://xxxx.ngrok-free.dev/ingest",
+                            help="Boş saxlasanız və ya aşağıdakı checkbox söndürülübsə, `.env`-dəki ARGUS_INGEST_URL istifadə olunur.",
+                        )
+                        wazuh_token_input = st.text_input(
+                            "Ingest Token (X-Argus-Token header-i)",
+                            value=wazuh_cfg_saved.get("ingest_token", ""),
+                            type="password",
+                            placeholder="(opsional)",
+                        )
+                        wazuh_submit = st.form_submit_button("💾 Saxla", use_container_width=True)
 
-        st.markdown("---")
-        st.subheader("🧩 Digər SIEM Platformaları")
-        st.caption("Hazırda yalnız görünür — icra məntiqinə qoşulma gələcək fazada ediləcək.")
-        for planned in integrations.PLANNED_INTEGRATIONS:
-            st.markdown(f"- **{planned['name']}** — 🚧 Tezliklə")
+                        if wazuh_submit:
+                            ok, err = integrations.save_integration(
+                                integrations.WAZUH_INTEGRATION_ID,
+                                "Wazuh SIEM",
+                                {"ingest_url": wazuh_url_input.strip(), "ingest_token": wazuh_token_input.strip()},
+                                wazuh_enabled_input,
+                            )
+                            if ok:
+                                st.success("✅ Wazuh konfiqurasiyası saxlanıldı.")
+                                st.rerun()
+                            else:
+                                st.error(f"❌ Saxlanmadı: {err}")
+
+            st.write("")
+
+            # ---- Splunk HEC (YENİ — tam funksional) ----
+            with st.container(border=True):
+                st.subheader("🟠 Splunk HEC (HTTP Event Collector)")
+
+                splunk_row = integrations.get_integration(integrations.SPLUNK_INTEGRATION_ID)
+                splunk_cfg = (splunk_row or {}).get("config") or {}
+                splunk_enabled_saved = bool((splunk_row or {}).get("enabled", False))
+                st.caption(_status_badge(splunk_enabled_saved, bool(splunk_cfg.get("endpoint_url"))))
+
+                if not _is_auth:
+                    st.warning("🔐 Konfiqurasiyanı dəyişmək üçün daxil olmalısınız.")
+                    if st.button("🔓 Daxil ol", key="login_gate_integrations_splunk"):
+                        st.query_params["page"] = "login"
+                        st.rerun()
+                else:
+                    with st.form("splunk_integration_form"):
+                        splunk_enabled_input = st.checkbox(
+                            "UI konfiqurasiyasını aktiv et", value=splunk_enabled_saved, key="splunk_enabled_cb"
+                        )
+                        splunk_url_input = st.text_input(
+                            "HEC Endpoint URL",
+                            value=splunk_cfg.get("endpoint_url", ""),
+                            placeholder="https://splunk.example.com:8088",
+                            key="splunk_url_input",
+                        )
+                        splunk_token_input = st.text_input(
+                            "HEC Token",
+                            value=splunk_cfg.get("hec_token", ""),
+                            type="password",
+                            placeholder="(Splunk Settings → Data Inputs → HTTP Event Collector)",
+                            key="splunk_token_input",
+                        )
+                        splunk_index_input = st.text_input(
+                            "İndeks adı",
+                            value=splunk_cfg.get("index", ""),
+                            placeholder="main",
+                            key="splunk_index_input",
+                        )
+                        col_save, col_test = st.columns(2)
+                        with col_save:
+                            splunk_submit = st.form_submit_button("💾 Saxla", use_container_width=True)
+                        with col_test:
+                            splunk_test_clicked = st.form_submit_button("🔌 Test Connection", use_container_width=True)
+
+                        if splunk_submit:
+                            ok, err = integrations.save_integration(
+                                integrations.SPLUNK_INTEGRATION_ID,
+                                "Splunk HEC",
+                                {
+                                    "endpoint_url": splunk_url_input.strip(),
+                                    "hec_token": splunk_token_input.strip(),
+                                    "index": splunk_index_input.strip(),
+                                },
+                                splunk_enabled_input,
+                            )
+                            if ok:
+                                st.success("✅ Splunk konfiqurasiyası saxlanıldı.")
+                                st.rerun()
+                            else:
+                                st.error(f"❌ Saxlanmadı: {err}")
+
+                        if splunk_test_clicked:
+                            with st.spinner("Splunk HEC-ə test sorğusu göndərilir..."):
+                                test_ok, test_msg = integrations.test_splunk_hec(
+                                    splunk_url_input.strip(), splunk_token_input.strip()
+                                )
+                            (st.success if test_ok else st.error)(test_msg)
+
+            st.write("")
+
+            # ---- Microsoft Sentinel (YENİ — tam funksional) ----
+            with st.container(border=True):
+                st.subheader("🔷 Microsoft Sentinel")
+
+                sentinel_row = integrations.get_integration(integrations.SENTINEL_INTEGRATION_ID)
+                sentinel_cfg = (sentinel_row or {}).get("config") or {}
+                sentinel_enabled_saved = bool((sentinel_row or {}).get("enabled", False))
+                st.caption(_status_badge(sentinel_enabled_saved, bool(sentinel_cfg.get("workspace_id"))))
+
+                if not _is_auth:
+                    st.warning("🔐 Konfiqurasiyanı dəyişmək üçün daxil olmalısınız.")
+                    if st.button("🔓 Daxil ol", key="login_gate_integrations_sentinel"):
+                        st.query_params["page"] = "login"
+                        st.rerun()
+                else:
+                    with st.form("sentinel_integration_form"):
+                        sentinel_enabled_input = st.checkbox(
+                            "UI konfiqurasiyasını aktiv et", value=sentinel_enabled_saved, key="sentinel_enabled_cb"
+                        )
+                        sentinel_workspace_input = st.text_input(
+                            "Log Analytics Workspace ID",
+                            value=sentinel_cfg.get("workspace_id", ""),
+                            placeholder="00000000-0000-0000-0000-000000000000",
+                            key="sentinel_workspace_input",
+                        )
+                        sentinel_key_input = st.text_input(
+                            "Shared Key (Primary/Secondary Key)",
+                            value=sentinel_cfg.get("shared_key", ""),
+                            type="password",
+                            placeholder="(Azure Portal → Log Analytics Workspace → Agents → Shared Keys)",
+                            key="sentinel_key_input",
+                        )
+                        sentinel_table_input = st.text_input(
+                            "Custom Log Type / Table adı",
+                            value=sentinel_cfg.get("log_type", "ArgusITDR"),
+                            placeholder="ArgusITDR",
+                            key="sentinel_table_input",
+                        )
+                        col_save, col_test = st.columns(2)
+                        with col_save:
+                            sentinel_submit = st.form_submit_button("💾 Saxla", use_container_width=True)
+                        with col_test:
+                            sentinel_test_clicked = st.form_submit_button("🔌 Test Connection", use_container_width=True)
+
+                        if sentinel_submit:
+                            ok, err = integrations.save_integration(
+                                integrations.SENTINEL_INTEGRATION_ID,
+                                "Microsoft Sentinel",
+                                {
+                                    "workspace_id": sentinel_workspace_input.strip(),
+                                    "shared_key": sentinel_key_input.strip(),
+                                    "log_type": sentinel_table_input.strip() or "ArgusITDR",
+                                },
+                                sentinel_enabled_input,
+                            )
+                            if ok:
+                                st.success("✅ Sentinel konfiqurasiyası saxlanıldı.")
+                                st.rerun()
+                            else:
+                                st.error(f"❌ Saxlanmadı: {err}")
+
+                        if sentinel_test_clicked:
+                            with st.spinner("Microsoft Sentinel-ə test yazısı göndərilir..."):
+                                test_ok, test_msg = integrations.test_sentinel(
+                                    sentinel_workspace_input.strip(), sentinel_key_input.strip()
+                                )
+                            (st.success if test_ok else st.error)(test_msg)
+
+        # ================================================================
+        # 🤖 AI & LLM PROVIDER INTEGRATION (YENİ)
+        # ================================================================
+        with ai_tab:
+            st.caption(
+                "⚠️ **Runtime qeydi:** AI Sigma Generator və AI Köməkçi hazırda YALNIZ "
+                f"`.env`/Secrets-dəki `AI_MODE` dəyərini (`{config.AI_MODE}`) istifadə edir. "
+                "Bu bölmədəki tənzimləmələr Supabase-də saxlanılır və gələcək fazada runtime-a "
+                "bağlanacaq — hazırda referans/hazırlıq məqsədlidir, heç bir mövcud davranışı DƏYİŞMİR."
+            )
+
+            active_provider_row = integrations.get_integration(integrations.AI_ACTIVE_PROVIDER_ID)
+            active_provider_saved = (active_provider_row or {}).get("config", {}).get("provider", "groq")
+
+            provider_labels = {"groq": "⚡ Groq Cloud AI", "openai": "🧠 OpenAI", "local": "🖥️ Ollama / Local"}
+            provider_keys = list(provider_labels.keys())
+
+            if _is_auth:
+                selected_provider = st.selectbox(
+                    "📌 Üstünlük verilən AI Rejimi (Supabase-də saxlanılır)",
+                    options=provider_keys,
+                    index=provider_keys.index(active_provider_saved) if active_provider_saved in provider_keys else 0,
+                    format_func=lambda k: provider_labels[k],
+                    key="ai_active_provider_select",
+                )
+                if st.button("💾 Üstünlüyü saxla", key="ai_active_provider_save"):
+                    ok, err = integrations.save_integration(
+                        integrations.AI_ACTIVE_PROVIDER_ID, "Active AI Provider",
+                        {"provider": selected_provider}, True,
+                    )
+                    (st.success("✅ Saxlanıldı.") if ok else st.error(f"❌ {err}"))
+            else:
+                st.info(f"📌 Hazırkı saxlanılan üstünlük: **{provider_labels.get(active_provider_saved, active_provider_saved)}**")
+
+            st.markdown("---")
+
+            # ---- Groq Cloud AI ----
+            with st.container(border=True):
+                st.subheader("⚡ Groq Cloud AI")
+                groq_row = integrations.get_integration(integrations.AI_GROQ_ID)
+                groq_cfg = (groq_row or {}).get("config") or {}
+                groq_enabled_saved = bool((groq_row or {}).get("enabled", False))
+                is_runtime_active = config.AI_MODE not in ("local",) and bool(config.LLM_API_KEY or config.OPENAI_API_KEY)
+                st.caption(
+                    _status_badge(groq_enabled_saved, bool(groq_cfg.get("api_key")))
+                    + ("  •  🟢 hazırda runtime-da aktivdir (.env)" if config.AI_MODE == "groq" else "")
+                )
+
+                if not _is_auth:
+                    st.warning("🔐 Konfiqurasiyanı dəyişmək üçün daxil olmalısınız.")
+                else:
+                    with st.form("groq_integration_form"):
+                        groq_enabled_input = st.checkbox("UI konfiqurasiyasını aktiv et", value=groq_enabled_saved, key="groq_enabled_cb")
+                        groq_base_url_input = st.text_input(
+                            "Base URL", value=groq_cfg.get("base_url", "https://api.groq.com/openai/v1"), key="groq_base_url_input"
+                        )
+                        groq_api_key_input = st.text_input(
+                            "API Key", value=groq_cfg.get("api_key", ""), type="password",
+                            placeholder="gsk_...", key="groq_api_key_input"
+                        )
+                        groq_model_input = st.text_input(
+                            "Model", value=groq_cfg.get("model", "llama-3.3-70b-versatile"), key="groq_model_input"
+                        )
+                        col_save, col_test = st.columns(2)
+                        with col_save:
+                            groq_submit = st.form_submit_button("💾 Saxla", use_container_width=True)
+                        with col_test:
+                            groq_test_clicked = st.form_submit_button("🔌 Test Connection", use_container_width=True)
+
+                        if groq_submit:
+                            ok, err = integrations.save_integration(
+                                integrations.AI_GROQ_ID, "Groq Cloud AI",
+                                {
+                                    "base_url": groq_base_url_input.strip(),
+                                    "api_key": groq_api_key_input.strip(),
+                                    "model": groq_model_input.strip(),
+                                },
+                                groq_enabled_input,
+                            )
+                            (st.success("✅ Groq konfiqurasiyası saxlanıldı.") if ok else st.error(f"❌ Saxlanmadı: {err}"))
+                            if ok:
+                                st.rerun()
+
+                        if groq_test_clicked:
+                            with st.spinner("Groq API-yə test sorğusu göndərilir..."):
+                                test_ok, test_msg = integrations.test_groq(
+                                    groq_api_key_input.strip(), groq_base_url_input.strip(), groq_model_input.strip()
+                                )
+                            (st.success if test_ok else st.error)(test_msg)
+
+            st.write("")
+
+            # ---- OpenAI ----
+            with st.container(border=True):
+                st.subheader("🧠 OpenAI")
+                openai_row = integrations.get_integration(integrations.AI_OPENAI_ID)
+                openai_cfg = (openai_row or {}).get("config") or {}
+                openai_enabled_saved = bool((openai_row or {}).get("enabled", False))
+                st.caption(
+                    _status_badge(openai_enabled_saved, bool(openai_cfg.get("api_key")))
+                    + ("  •  🟢 hazırda runtime-da aktivdir (.env)" if config.AI_MODE not in ("local", "groq") else "")
+                )
+
+                if not _is_auth:
+                    st.warning("🔐 Konfiqurasiyanı dəyişmək üçün daxil olmalısınız.")
+                else:
+                    with st.form("openai_integration_form"):
+                        openai_enabled_input = st.checkbox("UI konfiqurasiyasını aktiv et", value=openai_enabled_saved, key="openai_enabled_cb")
+                        openai_api_key_input = st.text_input(
+                            "API Key", value=openai_cfg.get("api_key", ""), type="password",
+                            placeholder="sk-...", key="openai_api_key_input"
+                        )
+                        openai_model_input = st.text_input(
+                            "Model", value=openai_cfg.get("model", "gpt-4o-mini"), key="openai_model_input"
+                        )
+                        col_save, col_test = st.columns(2)
+                        with col_save:
+                            openai_submit = st.form_submit_button("💾 Saxla", use_container_width=True)
+                        with col_test:
+                            openai_test_clicked = st.form_submit_button("🔌 Test Connection", use_container_width=True)
+
+                        if openai_submit:
+                            ok, err = integrations.save_integration(
+                                integrations.AI_OPENAI_ID, "OpenAI",
+                                {"api_key": openai_api_key_input.strip(), "model": openai_model_input.strip()},
+                                openai_enabled_input,
+                            )
+                            (st.success("✅ OpenAI konfiqurasiyası saxlanıldı.") if ok else st.error(f"❌ Saxlanmadı: {err}"))
+                            if ok:
+                                st.rerun()
+
+                        if openai_test_clicked:
+                            with st.spinner("OpenAI API-yə test sorğusu göndərilir..."):
+                                test_ok, test_msg = integrations.test_openai(
+                                    openai_api_key_input.strip(), openai_model_input.strip()
+                                )
+                            (st.success if test_ok else st.error)(test_msg)
+
+            st.write("")
+
+            # ---- Ollama / Local LLM ----
+            with st.container(border=True):
+                st.subheader("🖥️ Ollama / Local LLM")
+                ollama_row = integrations.get_integration(integrations.AI_OLLAMA_ID)
+                ollama_cfg = (ollama_row or {}).get("config") or {}
+                ollama_enabled_saved = bool((ollama_row or {}).get("enabled", False))
+                st.caption(
+                    _status_badge(ollama_enabled_saved, bool(ollama_cfg.get("host")))
+                    + ("  •  🟢 hazırda runtime-da aktivdir (.env)" if config.AI_MODE == "local" else "")
+                )
+
+                if not _is_auth:
+                    st.warning("🔐 Konfiqurasiyanı dəyişmək üçün daxil olmalısınız.")
+                else:
+                    with st.form("ollama_integration_form"):
+                        ollama_enabled_input = st.checkbox("UI konfiqurasiyasını aktiv et", value=ollama_enabled_saved, key="ollama_enabled_cb")
+                        ollama_host_input = st.text_input(
+                            "Host URL", value=ollama_cfg.get("host", "http://localhost:11434"), key="ollama_host_input"
+                        )
+                        ollama_model_input = st.text_input(
+                            "Model adı", value=ollama_cfg.get("model", "llama3"), key="ollama_model_input"
+                        )
+                        col_save, col_test = st.columns(2)
+                        with col_save:
+                            ollama_submit = st.form_submit_button("💾 Saxla", use_container_width=True)
+                        with col_test:
+                            ollama_test_clicked = st.form_submit_button("🔌 Test Connection", use_container_width=True)
+
+                        if ollama_submit:
+                            ok, err = integrations.save_integration(
+                                integrations.AI_OLLAMA_ID, "Ollama / Local LLM",
+                                {"host": ollama_host_input.strip(), "model": ollama_model_input.strip()},
+                                ollama_enabled_input,
+                            )
+                            (st.success("✅ Ollama konfiqurasiyası saxlanıldı.") if ok else st.error(f"❌ Saxlanmadı: {err}"))
+                            if ok:
+                                st.rerun()
+
+                        if ollama_test_clicked:
+                            with st.spinner("Ollama-ya test sorğusu göndərilir..."):
+                                test_ok, test_msg = integrations.test_ollama(
+                                    ollama_host_input.strip(), ollama_model_input.strip()
+                                )
+                            (st.success if test_ok else st.error)(test_msg)
