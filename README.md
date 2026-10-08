@@ -129,8 +129,8 @@ The Red Team engine executes **real authentication attempts and account changes 
 - [x] Public landing page + free navigation, action-level auth
 - [x] UI-managed SIEM integration settings
 - [x] AI sidebar copilot
-- [ ] Multi-user accounts (beyond single admin)
-- [ ] Additional SIEM connectors (Splunk, Microsoft Sentinel)
+- [x] Multi-user accounts (beyond single admin)
+- [x] Additional SIEM connectors (Splunk, Microsoft Sentinel)
 
 ---
 
