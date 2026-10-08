@@ -1,7 +1,7 @@
 """
 modules/wazuh_auditor.py
 -------------------------
-Argus ITDR üçün Audit modulu. İki əsas vəzifəsi var:
+Argus ITDR üçün Audit modulu. üç  əsas vəzifəsi var:
 
   1. AUDIT TRAIL — Wazuh Indexer-ə (OpenSearch, adətən port 9200) daxil olan
      ƏSL alert-ləri (local_rules.xml-dən keçib "wazuh-alerts-*" indeksinə
@@ -9,6 +9,8 @@ Argus ITDR üçün Audit modulu. İki əsas vəzifəsi var:
   2. COMPLIANCE CHECKS — daxil edilmiş identity telemetriyası üzərində
      bir sıra təhlükəsizlik qaydalarını yoxlayıb PASS/FAIL + tövsiyə
      şəklində nəticə verir.
+  3. DETECTION SUPPORT — security events üçün audit və detection proseslərini dəstəkləyir.
+
 
 KÖK SƏBƏB DÜZƏLİŞİ (bu versiyada): əvvəlki `WazuhAuditor.__init__` index
 bazasını `config.WAZUH_ENDPOINT`-dən (`.../argus-itdr-events/_doc`) çıxarırdı.

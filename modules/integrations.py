@@ -1,6 +1,8 @@
 """
 modules/integrations.py
 ------------------------
+(SIEM and detection integration)
+------------------------ 
 SIEM/inteqrasiya konfiqurasiyasının UI-dan idarə olunması (Faza 4, 2026-10-05).
 
 ƏVVƏLKİ DAVRANIŞ TOXUNULMAYIB: Wazuh ingest bridge ünvanı/tokeni əvvəllər
