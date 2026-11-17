@@ -50,96 +50,79 @@ def dashboard(rows):
     st.plotly_chart(
         px.bar(timeline, x="Timestamp", y="Events", title="Observed attack timeline",
                labels={"Timestamp": "Time bucket (UTC)"}).update_xaxes(type="date", nticks=10),
-        use_container_width=True,
+        width="stretch",
     )
     frame["Attack type"] = frame.apply(lambda r: r.get("attack_type") or r.get("AuthMethod") or "Unclassified", axis=1)
     counts = frame["Attack type"].value_counts().rename_axis("Attack type").reset_index(name="Events")
     left, right = st.columns(2)
-    left.plotly_chart(px.bar(counts, x="Attack type", y="Events", title="Attack type distribution"), use_container_width=True)
+    left.plotly_chart(px.bar(counts, x="Attack type", y="Events", title="Attack type distribution"), width="stretch")
     users = frame["TargetUserName"].value_counts().head(10).rename_axis("Target user").reset_index(name="Events")
-    right.plotly_chart(px.bar(users, x="Events", y="Target user", orientation="h", title="Most targeted users"), use_container_width=True)
+    right.plotly_chart(px.bar(users, x="Events", y="Target user", orientation="h", title="Most targeted users"), width="stretch")
     query = st.text_input("Filter incident table", placeholder="Target user, severity, attack type, or status")
     filtered = frame[frame.astype(str).apply(lambda column: column.str.contains(query, case=False, regex=False)).any(axis=1)] if query else frame
-    st.dataframe(filtered, hide_index=True, use_container_width=True)
+    st.dataframe(filtered, hide_index=True, width="stretch")
     with st.expander("Current session telemetry"):
         st.dataframe(st.session_state.get("df", pd.DataFrame()), hide_index=True)
 
 
-def chat(rows):
-    st.header("Interactive Analysis · AI SOC Copilot")
+def response_center(rows):
+    from modules import config
+    from modules.threat_center import compromised_alerts, generate_sigma, generate_actions
+    st.header("Threat Response & AI Center")
     if rows is None:
         return
-    st.caption("Answers use the latest 20 tenant records. AI guidance requires analyst review.")
-    if current().role == "Read-Only Auditor":
-        st.info("SOC Analyst or Admin access is required for AI requests.")
+    alerts = compromised_alerts(rows)
+    if not alerts:
+        st.info("No compromised or high-risk account alerts.")
         return
-    history = st.session_state.setdefault("live_chat", [])
-    for message in history:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
-    prompt = st.chat_input("Ask about observed threats, targeted users, or response priorities")
-    if prompt:
-        history.append({"role": "user", "content": prompt})
+    selected_user = st.selectbox("Compromised User Alert", [a["user"] for a in alerts])
+    alert = next(a for a in alerts if a["user"] == selected_user)
+    identity = (current().tenant_id, selected_user, str(alert["incident_id"]))
+    if st.session_state.get("center_selection") != identity:
+        st.session_state["center_selection"] = identity
+        st.session_state["center_approval"] = False
+        st.session_state.pop("center_sigma", None)
+        st.session_state.pop("center_actions", None)
+        st.session_state.pop("center_response", None)
+    st.dataframe(pd.DataFrame([{
+        "UPN": alert["user"], "Source IP": alert["source_ip"], "Failed": alert["failed"],
+        "Success": alert["success"], "Attack pattern": alert["pattern"], "Timestamp (UTC)": alert["timestamp"],
+    }]), hide_index=True, width="stretch")
+    writable = current().role in {"Admin", "SOC Analyst"}
+    st.subheader("AI Sigma Rule Generator")
+    if st.button("Generate Sigma Rule", disabled=not writable, width="content"):
         try:
-            with st.spinner("Analyzing tenant evidence..."):
-                answer = soc_chat(history, rows[:20])
-            history.append({"role": "assistant", "content": answer})
-            st.rerun()
+            with st.spinner("Generating Sigma rule..."):
+                st.session_state["center_sigma"] = generate_sigma(alert)
         except Exception as error:
             st.error(str(error))
-    if st.button("Clear analysis conversation"):
-        st.session_state["live_chat"] = []
-        st.rerun()
-
-
-def detection(rows):
-    st.header("Threat Detection Engine")
-    if rows is None:
-        return
-    st.caption("Rule: more than five failed logins for one user within a rolling five-minute window.")
-    if st.button("Evaluate live rules", disabled=current().role == "Read-Only Auditor"):
-        require("write")
-        findings = evaluate(rows)
-        st.dataframe(findings, hide_index=True)
-        for finding in findings:
-            for incident_id in finding["incident_ids"]:
-                # Admin-only update policy prevents analysts from changing incident classification.
-                if current().role == "Admin":
-                    current().client.table("events").update({"attack_type": finding["attack_type"], "severity": finding["severity"]}).eq("tenant_id", current().tenant_id).eq("id", incident_id).execute()
-        if not findings:
-            st.info("No threshold breaches found in timestamped records.")
+    if st.session_state.get("center_sigma"):
+        st.code(st.session_state["center_sigma"], language="yaml")
+        st.download_button("Download Sigma .yml", st.session_state["center_sigma"], "argus-account-detection.yml", "application/yaml")
+    st.subheader("Live Session Revoke & Account Disable")
+    live = current().role == "Admin" and config.ENABLE_REAL_REMEDIATION and alert["incident_id"] is not None
     if current().role != "Admin":
-        st.info("Admin access is required for Microsoft Graph remediation.")
-        return
-    if not rows:
-        return
-    selected = st.selectbox("Incident to remediate", rows, format_func=lambda r: f"#{r['id']} · {r.get('TargetUserName', 'Unknown')} · {r.get('status', 'New')}")
-    from modules import config
-    if st.session_state.get("response_selected_id") != selected["id"]:
-        st.session_state["response_selected_id"] = selected["id"]
-        st.session_state["response_approved"] = False
-    st.subheader("Response preview")
-    st.write("Target account: " + str(selected.get("TargetUserName", "Unknown")))
-    st.caption("Revoke Sessions invalidates refresh tokens and requires fresh authentication. Block User disables the account and prevents new sign-ins. Revoke & Block executes both actions; an upstream failure may leave a partial response.")
-    if config.ENABLE_REAL_REMEDIATION:
-        st.warning("Live response mode: approved actions change the selected account in Microsoft Entra ID.")
-    else:
-        st.info("Real remediation is disabled. Enable it explicitly in configuration before approving a live response.")
-    approved = st.checkbox("I approve the selected account response", key="response_approved", disabled=not config.ENABLE_REAL_REMEDIATION)
-    for column, label, action in zip(st.columns(3), ["Revoke Sessions", "Block User", "Revoke & Block"], ["revoke", "block", "both"]):
-        if column.button(label, disabled=not approved or not config.ENABLE_REAL_REMEDIATION):
-            try:
-                st.json(respond_to_incident(selected["id"], action))
-                st.success("Graph confirmed the response. Incident updated.")
-            except Exception as error:
-                st.error(str(error))
-                response = getattr(error, "response", None)
-                if response is not None:
-                    try:
-                        body = response.json()
-                    except ValueError:
-                        body = response.text[:4000]
-                    st.json({"http_status": response.status_code, "response": body})
+        st.caption("Admin access required.")
+    elif not config.ENABLE_REAL_REMEDIATION:
+        st.caption("Real remediation is disabled.")
+    approved = st.checkbox("I approve session revocation and account disable", key="center_approval", disabled=not live)
+    if st.button("Revoke Sessions & Disable Account", disabled=not live or not approved, width="content"):
+        try:
+            st.session_state["center_response"] = respond_to_incident(alert["incident_id"], "both")
+        except Exception as error:
+            st.error(str(error))
+    if st.session_state.get("center_response"):
+        st.json(st.session_state["center_response"])
+        st.success("Graph confirmed the response. Incident and audit updated.")
+    st.subheader("AI Automated Playbook & Action Outcomes")
+    if st.button("Generate Possible Actions", disabled=not writable, width="content"):
+        try:
+            with st.spinner("Generating action outcomes..."):
+                st.session_state["center_actions"] = generate_actions(alert)
+        except Exception as error:
+            st.error(str(error))
+    if st.session_state.get("center_actions"):
+        st.dataframe(st.session_state["center_actions"], hide_index=True, width="stretch")
 
 
 def report():
@@ -200,10 +183,8 @@ def render(route):
         rows = records()
         if "Blue Team" in route:
             dashboard(rows)
-        elif "Threat Detection" in route:
-            detection(rows)
         else:
-            chat(rows)
+            response_center(rows)
     except Exception as error:
         st.error(str(error))
 

@@ -691,7 +691,18 @@ st.sidebar.markdown("**Argus ITDR**")
 st.sidebar.caption("Identity Threat Detection and Response")
 st.sidebar.markdown("NAVIGATION")
 
-MENU_OPTIONS = ['Blue Team & ITDR Dashboard', 'Live Log Ingestion', 'AI Threat Analysis & Auto-Fix', 'Red Team Attack Controller', 'Interactive Analytics', 'Threat Detection Engine', 'SIEM Integration Test', 'Security Audit Report', 'Integrations']
+MENU_OPTIONS = ['Blue Team & ITDR Dashboard', 'Live Log Ingestion', 'Threat Response & AI Center', 'Red Team Attack Controller', 'SIEM Integration Test', 'Security Audit Report', 'Integrations']
+
+from modules.threat_center import canonical_route
+if 'argus_nav_menu' in st.session_state:
+    st.session_state['argus_nav_menu'] = canonical_route(st.session_state['argus_nav_menu'])
+requested_route = st.query_params.get('route')
+if requested_route:
+    route = canonical_route(requested_route)
+    if route in MENU_OPTIONS and st.session_state.get('requested_route_applied') != route:
+        st.session_state['argus_nav_menu'] = route
+        st.session_state['requested_route_applied'] = route
+        st.query_params['route'] = route
 
 selected_menu = st.sidebar.radio(
     "Navigation",
@@ -700,7 +711,8 @@ selected_menu = st.sidebar.radio(
     key="argus_nav_menu",
 )
 
-render_ai_chatbot_sidebar()
+if selected_menu != "Threat Response & AI Center":
+    render_ai_chatbot_sidebar()
 render_account_sidebar()
 st.title("Argus ITDR SOC Workspace")
 # ========================================================================
@@ -797,7 +809,7 @@ elif selected_menu == "Live Log Ingestion":
             st.info("Upload identity telemetry CSV logs or use the Red Team Attack Controller to generate live attack logs.")
 
 # TAB 2: AI Threat Analysis & Auto-Fix
-elif selected_menu == "AI Threat Analysis & Auto-Fix":
+elif selected_menu == "Threat Response & AI Center":
     from modules.live_ui import render
     with loading_placeholder("Loading workspace data"):
         render(selected_menu)

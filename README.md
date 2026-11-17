@@ -163,3 +163,9 @@ Phase 2 live integration setup:
 - Detection evaluates real 4625 events from the latest five minutes. CSV `timestamp`, `Timestamp`, or `created_at` values are preserved on ingestion. Legacy records use their stored ingestion timestamp. A repeated-user threshold is labeled Brute Force; password spray requires cross-account evidence.
 
 Verification: `python -m compileall app_ui.py receiver.py modules` and `python -m unittest discover -s tests -v`. Database RLS tests additionally require the disposable database configured by the test suite.
+
+## Threat Response & AI Center
+
+The center replaces AI Threat Analysis & Auto-Fix, Interactive Analytics, and Threat Detection Engine. Legacy navigation state and `?route=` links map to the center. Alerts group accounts with High/Critical events, more than five failures in a rolling five-minute window, or a success following at least three consecutive recorded failures. The latter is a historical sequence signal without a fixed time limit, not proof of compromise. Counts cover the loaded tenant records.
+
+Analysts and Admins can generate account-bound Sigma YAML and structured proposed action outcomes through the tenant AI provider. Sigma is parsed with pySigma; Wazuh deployment requires a Sigma-compatible backend and field mapping, not direct XML rule upload. Admins can approve session revocation and account disable through the existing Graph response service. Protected-account checks and tenant-scoped incident/audit writes remain enforced. Changing the selected account clears AI output and approval.

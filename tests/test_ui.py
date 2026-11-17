@@ -26,7 +26,7 @@ class UIWorkflowTests(unittest.TestCase):
         app = AppTest.from_file(str(APP)).run(timeout=30)
         self.assertFalse(app.exception)
         self.assertEqual(app.title[0].value, "Argus ITDR SOC Workspace")
-        self.assertEqual(len(app.radio[0].options), 9)
+        self.assertEqual(len(app.radio[0].options), 7)
         self.assertTrue(any("Guest Mode" in item.value for item in app.caption))
         create = next(button for button in app.button if button.label == "Create Workspace")
         create.click().run(timeout=30)
