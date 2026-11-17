@@ -54,7 +54,7 @@ class ThreatCenterTests(unittest.TestCase):
         rows = [event(1, severity="High"), event(2, severity="High", user="other@example.test")]
         app = AppTest.from_string("from modules.live_ui import response_center\nfrom modules.authorization import bind, Principal\nimport streamlit as st\nbind(Principal('actor','tenant','Admin',None))\nresponse_center(st.session_state['rows'])")
         app.session_state["rows"] = rows
-        with patch("modules.config.ENABLE_REAL_REMEDIATION", True), patch("modules.live_ui.respond_to_incident", return_value=[{"action": "block", "http_status": 204}]) as response, patch("modules.threat_center.generate_sigma", return_value="title: test"), patch("modules.threat_center.generate_actions", return_value=[{"Possible Actions": "Review", "Expected Outcomes & Impact": "Evidence"}]):
+        with patch("modules.config.ENABLE_REAL_REMEDIATION", True), patch("modules.threat_center_ui.respond_to_incident", return_value=[{"action": "block", "http_status": 204}]) as response, patch("modules.threat_center.generate_sigma", return_value="title: test"), patch("modules.threat_center.generate_actions", return_value=[{"Possible Actions": "Review", "Expected Outcomes & Impact": "Evidence"}]):
             app.run()
             self.assertFalse(app.exception)
             next(b for b in app.button if b.label == "Generate Sigma Rule").click().run()
@@ -100,3 +100,10 @@ class ThreatCenterTests(unittest.TestCase):
                 respond_to_incident(1, "both")
             graph.request.assert_not_called()
             q.update.assert_not_called()
+
+    def test_action_table_combines_separate_outcome_and_impact(self):
+        bind(Principal("actor", "tenant", "SOC Analyst", None))
+        alert = compromised_alerts([event(1, severity="High")])[0]
+        raw = [{"Possible Actions": "Revoke sessions", "Expected Outcomes": "Invalidates tokens.", "Impact": "Fresh authentication required."}]
+        with patch("modules.threat_center.soc_chat", return_value=json.dumps(raw)):
+            self.assertIn("Fresh authentication", generate_actions(alert)[0]["Expected Outcomes & Impact"])

@@ -810,9 +810,9 @@ elif selected_menu == "Live Log Ingestion":
 
 # TAB 2: AI Threat Analysis & Auto-Fix
 elif selected_menu == "Threat Response & AI Center":
-    from modules.live_ui import render
-    with loading_placeholder("Loading workspace data"):
-        render(selected_menu)
+    from modules.live_ui import records
+    from modules.threat_center_ui import response_center
+    response_center(records())
 
 elif selected_menu == "Red Team Attack Controller":
     try:

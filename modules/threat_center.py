@@ -86,13 +86,19 @@ def generate_sigma(alert):
 
 def generate_actions(alert):
     require("write")
-    prompt = ("Return only a JSON array of 3 to 5 objects with string keys Possible Actions, "
+    prompt = ("Return only a JSON array of 3 to 5 objects. Exact JSON keys: Possible Actions, "
               "Expected Outcomes & Impact. Each value under 180 characters, English only. "
               "Give specific response steps for the selected account; distinguish proposed actions from executed outcomes. "
               "Include session revocation, disabling the account, and evidence review. "
               "Never claim any action has run. Alert: " + json.dumps({k: v for k, v in alert.items() if k != "rows"}, default=str))
     result = json.loads(_strip_markdown_fences(soc_chat([{"role": "user", "content": prompt}], alert["rows"][-20:])))
+    if isinstance(result, list):
+        for row in result:
+            if isinstance(row, dict) and "Expected Outcomes & Impact" not in row:
+                outcomes, impact = row.get("Expected Outcomes"), row.get("Impact")
+                if isinstance(outcomes, str) and isinstance(impact, str):
+                    row["Expected Outcomes & Impact"] = outcomes + " " + impact
     keys = ["Possible Actions", "Expected Outcomes & Impact"]
-    if not isinstance(result, list) or not 1 <= len(result) <= 5 or any(not isinstance(r, dict) or any(not isinstance(r.get(k), str) or not r[k].strip() or len(r[k]) > 240 for k in keys) for r in result):
+    if not isinstance(result, list) or not 1 <= len(result) <= 5 or any(not isinstance(r, dict) or any(not isinstance(r.get(k), str) or not r[k].strip() or len(r[k]) > 400 for k in keys) for r in result):
         raise ValueError("AI returned an invalid action table. Retry generation.")
     return [{k: r[k] for k in keys} for r in result]
