@@ -72,6 +72,9 @@ class LiveIntegrationTests(unittest.TestCase):
         self.assertIn("&lt;script&gt;", html)
         self.assertNotIn("<script>", html)
         self.assertTrue(pdf.startswith(b"%PDF"))
+        self.assertIn("background:#FFFFFF;color:#111827", html)
+        self.assertIn('name="color-scheme" content="light"', html)
+        self.assertIn("<html lang=", html)
         self.assertIn("1 high or critical", html)
 
     def test_bearer_bridge_is_bound_to_server_assignment(self):

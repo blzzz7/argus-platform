@@ -38,11 +38,21 @@ class ControllerTargets(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "Complete Graph target discovery failed"):
             self.targets([], {"graph_fetch_ok": True, "real_user_count": 200}, (False, "offline"))
 
-    def test_limit_defaults_to_all_targets(self):
+    def test_limit_defaults_to_live_graph_count(self):
         tree = ast.parse((Path(__file__).resolve().parents[1] / "app_ui.py").read_text(encoding="utf-8"))
         widget = next(n for n in ast.walk(tree) if isinstance(n, ast.Call)
                       and ast.unparse(n.func) == "st.number_input" and n.args
                       and isinstance(n.args[0], ast.Constant) and n.args[0].value == "Max Target Limit")
         keywords = {k.arg: ast.unparse(k.value) for k in widget.keywords}
-        self.assertEqual(keywords["value"], "available_targets")
+        self.assertEqual(keywords["value"], "default_target_limit")
         self.assertEqual(keywords["max_value"], "available_targets")
+
+    def test_single_execution_button_and_live_default(self):
+        tree = ast.parse((Path(__file__).resolve().parents[1] / "app_ui.py").read_text(encoding="utf-8"))
+        labels = [n.args[0].value for n in ast.walk(tree) if isinstance(n, ast.Call) and ast.unparse(n.func) == "st.button" and n.args and isinstance(n.args[0], ast.Constant)]
+        self.assertEqual(labels.count("Execute Selected Attack"), 1)
+        self.assertFalse(any(label.startswith("Launch ") for label in labels))
+        assignment = next(n for n in ast.walk(tree) if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "default_target_limit" for t in n.targets))
+        for discovery, expected in [({"graph_fetch_ok": True, "real_user_count": 15}, 15), ({"graph_fetch_ok": False, "real_user_count": 15}, 163), ({"graph_fetch_ok": True, "real_user_count": 200}, 163)]:
+            result = eval(compile(ast.Expression(assignment.value), "default_limit", "eval"), {"wordlist_info": discovery, "available_targets": 163})
+            self.assertEqual(result, expected)

@@ -17,6 +17,16 @@ def build_report(records, summary, tenant_id, period):
     heading = "Argus ITDR Security Audit Report"
     metadata = f"Tenant: {tenant_id} | Period: {period} | Records: {len(records)}"
     markup = "<h1>" + heading + "</h1><p>" + escape(metadata) + "</p><h2>Executive Summary</h2><p>" + escape(summary) + "</p><h2>Incident Breakdown</h2><table><thead><tr>" + "".join("<th>" + c + "</th>" for c in columns) + "</tr></thead><tbody>" + "".join("<tr>" + "".join("<td>" + escape(cell) + "</td>" for cell in row) + "</tr>" for row in values) + "</tbody></table><h2>Compliance &amp; Posture Recommendations</h2><p>" + escape(recommendations) + "</p>"
+    markup = ('<!doctype html><html lang="en"><head><meta charset="utf-8">'
+              '<meta name="color-scheme" content="light">'
+              '<meta name="viewport" content="width=device-width, initial-scale=1">'
+              '<style>:root{color-scheme:light}html,body{background:#FFFFFF;color:#111827;'
+              'font-family:Arial,sans-serif;line-height:1.5;margin:0}body{padding:24px}'
+              'h1,h2,p,th,td{color:#111827}h1{font-size:24px}h2{font-size:18px;margin-top:24px}'
+              'table{border-collapse:collapse;width:100%;background:#FFFFFF}'
+              'th,td{border:1px solid #CBD5E1;padding:10px;text-align:left;overflow-wrap:anywhere}'
+              'th{background:#E2E8F0}tbody tr:nth-child(even){background:#F1F5F9}'
+              '</style></head><body>' + markup + '</body></html>')
     output = io.BytesIO()
     story = [Paragraph(heading, styles["Title"]), Paragraph(escape(metadata), styles["Normal"]), Spacer(1, 16), Paragraph("Executive Summary", styles["Heading2"]), Paragraph(escape(summary), styles["Normal"]), Paragraph("Incident Breakdown", styles["Heading2"])]
     data = [[Paragraph(escape(cell), styles["Normal"]) for cell in row] for row in [columns] + values]

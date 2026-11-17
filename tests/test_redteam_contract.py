@@ -92,7 +92,7 @@ class RedTeamContract(unittest.TestCase):
         def plain_labels(value):
             value = re.sub("[\U0001F000-\U0001FAFF\u2600-\u27BF\uFE0F]", "", value)
             return value.replace("value=' ", "value='")
-        expected = [value for value in self.baseline["widgets"] if "Max Target Limit" not in value]
+        expected = [value for value in self.baseline["widgets"] if "Max Target Limit" not in value and not "Launch " in value]
         self.assertEqual([plain_labels(value) for value in widgets], [plain_labels(value) for value in expected])
         initialization = [ast.dump(n, include_attributes=False) for n in ast.walk(self.tree) if isinstance(n, ast.Call) and ast.unparse(n.func) in {"generate_wordlists", "IdentityAttackEngine"}]
         self.assertEqual(initialization, self.baseline["initialization_calls"])

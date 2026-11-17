@@ -54,17 +54,17 @@ class ThreatCenterTests(unittest.TestCase):
         rows = [event(1, severity="High"), event(2, severity="High", user="other@example.test")]
         app = AppTest.from_string("from modules.live_ui import response_center\nfrom modules.authorization import bind, Principal\nimport streamlit as st\nbind(Principal('actor','tenant','Admin',None))\nresponse_center(st.session_state['rows'])")
         app.session_state["rows"] = rows
-        with patch("modules.config.ENABLE_REAL_REMEDIATION", True), patch("modules.threat_center_ui.respond_to_incident", return_value=[{"action": "block", "http_status": 204}]) as response, patch("modules.threat_center.generate_sigma", return_value="title: test"), patch("modules.threat_center.generate_actions", return_value=[{"Possible Actions": "Review", "Expected Outcomes & Impact": "Evidence"}]):
+        with patch("modules.config.ENABLE_REAL_REMEDIATION", True), patch("modules.threat_center_ui.response_target"), patch("modules.threat_center_ui.respond_to_incident", return_value=[{"action": "block", "http_status": 204}]) as response, patch("modules.threat_center.generate_sigma", return_value="title: test"), patch("modules.threat_center.generate_actions", return_value=[{"Possible Actions": "Review", "Expected Outcomes & Impact": "Evidence"}]):
             app.run()
             self.assertFalse(app.exception)
             next(b for b in app.button if b.label == "Generate Sigma Rule").click().run()
             self.assertEqual(app.code[0].value, "title: test")
             next(b for b in app.button if b.label == "Generate Possible Actions").click().run()
-            app.checkbox[0].check().run()
+            self.assertEqual(len(app.checkbox), 0)
             next(b for b in app.button if b.label == "Revoke Sessions & Disable Account").click().run()
             response.assert_called_once_with(2, "both")
-            app.selectbox[0].select("test@example.test").run()
-            self.assertFalse(app.checkbox[0].value)
+            app.radio[0].set_value("test@example.test").run()
+            self.assertEqual(len(app.checkbox), 0)
             self.assertEqual(len(app.code), 0)
 
     def test_ui_auditor_cannot_generate_or_remediate(self):
@@ -73,7 +73,7 @@ class ThreatCenterTests(unittest.TestCase):
         app.run()
         self.assertFalse(app.exception)
         self.assertTrue(all(b.disabled for b in app.button))
-        self.assertTrue(app.checkbox[0].disabled)
+        self.assertEqual(len(app.checkbox), 0)
 
     def test_legacy_query_routes_redirect(self):
         from pathlib import Path
@@ -108,3 +108,13 @@ class ThreatCenterTests(unittest.TestCase):
         with patch("modules.threat_center.soc_chat", return_value=json.dumps({"actions": raw})) as chat:
             self.assertIn("Fresh authentication", generate_actions(alert)[0]["Expected Outcomes & Impact"])
             self.assertEqual(chat.call_args.kwargs["response_format"], {"type": "json_object"})
+
+    def test_protected_account_disables_direct_action(self):
+        app = AppTest.from_string("from modules.threat_center_ui import response_center\nfrom modules.authorization import bind, Principal\nimport streamlit as st\nbind(Principal('actor','tenant','Admin',None))\nresponse_center(st.session_state['rows'])")
+        app.session_state["rows"] = [event(1, severity="High")]
+        with patch("modules.config.ENABLE_REAL_REMEDIATION", True), patch("modules.threat_center_ui.response_target", side_effect=PermissionError("Protected account cannot be remediated.")), patch("modules.threat_center_ui.respond_to_incident") as response:
+            app.run()
+            self.assertTrue(next(b for b in app.button if b.label == "Revoke Sessions & Disable Account").disabled)
+            self.assertEqual(app.radio[0].options, ["test@example.test"])
+            self.assertEqual(len(app.checkbox), 0)
+            response.assert_not_called()

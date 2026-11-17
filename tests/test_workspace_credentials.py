@@ -99,7 +99,7 @@ class WorkspaceTests(unittest.TestCase):
             self.assertTrue(any(item.label == "Attack vector" for item in app.selectbox))
             self.assertTrue(any(item.label == "Target domain" for item in app.text_input))
             self.assertTrue(any(item.label == "MFA iteration limit" for item in app.slider))
-            self.assertTrue(any(item.label == "Execute selected attack" and not item.disabled for item in app.button))
+            self.assertTrue(any(item.label == "Execute Selected Attack" and not item.disabled for item in app.button))
             self.assertFalse(any("Guest preview" in item.value for item in app.caption))
             limit = next(item for item in app.number_input if item.label == "Max Target Limit")
             self.assertEqual(limit.value, len(engine.users))

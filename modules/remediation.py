@@ -64,6 +64,23 @@ def execute(run_id, user, ip, severity, approved=False):
     return {"status": status, **detail}
 
 
+def response_target(user):
+    """Read-only eligibility check; execution repeats it before Graph mutations."""
+    require("remediate")
+    if not config.ENABLE_REAL_REMEDIATION:
+        raise RuntimeError("Real remediation is disabled.")
+    settings = secrets()
+    if not settings.get("protected_accounts"):
+        raise RuntimeError("Configure protected emergency accounts before remediation.")
+    if user.casefold() in {str(account).casefold() for account in settings["protected_accounts"]}:
+        raise PermissionError("Protected account cannot be remediated.")
+    graph = GraphClient(settings)
+    target = graph.resolve(user)
+    if target["id"] in {graph.resolve(account)["id"] for account in settings["protected_accounts"]}:
+        raise PermissionError("Protected account cannot be remediated.")
+    return graph, target
+
+
 def respond_to_incident(incident_id, action):
     """Execute an approved response and persist only confirmed Graph outcomes."""
     from urllib.parse import quote
@@ -75,13 +92,7 @@ def respond_to_incident(incident_id, action):
     rows = p.client.table("events").select("*").eq("tenant_id", p.tenant_id).eq("id", incident_id).execute().data
     if not rows:
         raise PermissionError("Incident does not belong to this workspace.")
-    settings = secrets()
-    if not settings.get("protected_accounts"):
-        raise RuntimeError("Configure protected emergency accounts before remediation.")
-    graph = GraphClient(settings)
-    target = graph.resolve(rows[0]["TargetUserName"])
-    if target["id"] in {graph.resolve(user)["id"] for user in settings["protected_accounts"]}:
-        raise PermissionError("Protected account cannot be remediated.")
+    graph, target = response_target(rows[0]["TargetUserName"])
     path = "users/" + quote(target["id"], safe="")
     responses = []
     for step in (["revoke", "block"] if action == "both" else [action]):

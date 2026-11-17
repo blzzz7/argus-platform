@@ -2,7 +2,7 @@
 import pandas as pd
 import streamlit as st
 from modules.authorization import current
-from modules.remediation import respond_to_incident
+from modules.remediation import respond_to_incident, response_target
 
 
 def response_center(rows):
@@ -15,12 +15,11 @@ def response_center(rows):
     if not alerts:
         st.info("No compromised or high-risk account alerts.")
         return
-    selected_user = st.selectbox("Compromised User Alert", [a["user"] for a in alerts])
+    selected_user = st.radio("Compromised User Alert", [a["user"] for a in alerts])
     alert = next(a for a in alerts if a["user"] == selected_user)
     identity = (current().tenant_id, selected_user, str(alert["incident_id"]))
     if st.session_state.get("center_selection") != identity:
         st.session_state["center_selection"] = identity
-        st.session_state["center_approval"] = False
         st.session_state.pop("center_sigma", None)
         st.session_state.pop("center_actions", None)
         st.session_state.pop("center_response", None)
@@ -45,8 +44,13 @@ def response_center(rows):
         st.caption("Admin access required.")
     elif not config.ENABLE_REAL_REMEDIATION:
         st.caption("Real remediation is disabled.")
-    approved = st.checkbox("I approve session revocation and account disable", key="center_approval", disabled=not live)
-    if st.button("Revoke Sessions & Disable Account", disabled=not live or not approved, width="content"):
+    if live:
+        try:
+            response_target(alert["user"])
+        except Exception as error:
+            live = False
+            st.caption(str(error))
+    if st.button("Revoke Sessions & Disable Account", disabled=not live, width="content"):
         try:
             st.session_state["center_response"] = respond_to_incident(alert["incident_id"], "both")
         except Exception as error:

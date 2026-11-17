@@ -13,6 +13,7 @@ def controller_targets(existing, discovery):
         if not ok:
             raise RuntimeError("Complete Graph target discovery failed; retry before running a simulation.")
         targets.extend(users)
+        discovery["real_user_count"] = len(users)
     targets.append("victimuser@example.onmicrosoft.com")
     targets.extend(f"fake_user_{i}@{DOMAIN}" for i in range(1, 100))
     return list(dict.fromkeys(targets))

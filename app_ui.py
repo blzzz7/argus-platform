@@ -899,19 +899,13 @@ elif selected_menu == "Red Team Attack Controller":
             help='This password is added first, before the standard wordlist.'
         )
         available_targets = max(1, len(attack_engine.users) if attack_engine else 1)
+        default_target_limit = min(available_targets, max(1, int(wordlist_info["real_user_count"]))) if wordlist_info and wordlist_info.get("graph_fetch_ok") else available_targets
         max_targets_count = int(st.number_input(
-            "Max Target Limit", min_value=1, max_value=available_targets, value=available_targets, step=1,
-            help="Defaults to every discovered and synthetic target in the authorized test tenant.",
+            "Max Target Limit", min_value=1, max_value=available_targets, value=default_target_limit, step=1,
+            help="Defaults to the live Graph user count. Increase the limit to include synthetic targets.",
         ))
 
-        st.markdown("---")
-        st.subheader("Attack Triggers")
-
-        btn_enum = st.button("Launch User Enumeration", disabled=attack_engine is None)
-        btn_spray = st.button("Launch Password Spray Attack", disabled=attack_engine is None)
-        btn_brute = st.button("Launch Brute Force Attack", disabled=attack_engine is None)
-        btn_mfa = st.button("Launch MFA Fatigue Simulation", disabled=attack_engine is None)
-        btn_device = st.button("Launch Device Code Flow Phishing", disabled=attack_engine is None)
+        btn_enum = btn_spray = btn_brute = btn_mfa = btn_device = False
 
     with col_right:
         st.subheader("Live Attack Terminal Console (`attack_engine.py`)")
@@ -924,7 +918,7 @@ elif selected_menu == "Red Team Attack Controller":
             language="bash"
         )
 
-    if st.button("Execute selected attack", disabled=attack_engine is None, key="execute_attack"):
+    if st.button("Execute Selected Attack", disabled=attack_engine is None, key="execute_attack"):
         btn_enum, btn_spray, btn_brute, btn_mfa, btn_device = [attack_vector == name for name in ["User Enumeration", "Password Spray", "Brute Force", "MFA Fatigue", "Device Code Flow"]]
     _redteam_triggered = attack_engine is not None and (btn_enum or btn_spray or btn_brute or btn_mfa or btn_device)
     if _redteam_triggered and not require_login(
