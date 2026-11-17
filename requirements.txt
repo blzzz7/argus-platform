@@ -13,3 +13,4 @@ pysigma
 supabase
 flask
 cryptography
+PyYAML

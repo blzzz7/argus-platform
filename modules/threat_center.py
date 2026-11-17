@@ -67,17 +67,20 @@ def generate_sigma(alert):
               "Use title, id (UUID), status, description, logsource, detection and level. "
               "Use observed field names EventID, TargetUserName, IpAddress, AuthMethod. "
               "Include an exact TargetUserName selector for the selected account. "
-              "Use only observed EventID/IP/AuthMethod values. No claims of native Wazuh XML deployment. "
+              "Use only observed EventID/IP/AuthMethod values. Generate a single-event indicator, not a correlation rule. No timeframe, aggregation or temporal detection claims. No claims of native Wazuh XML deployment. "
               "Selected alert: " + json.dumps({k: v for k, v in alert.items() if k != "rows"}, default=str))
     raw = soc_chat([{"role": "user", "content": prompt}], alert["rows"][-20:])
     text = _strip_markdown_fences(raw)
     rule = yaml.safe_load(text)
     if not isinstance(rule, dict) or not rule.get("title") or not isinstance(rule.get("logsource"), dict) or not _detection_is_valid(rule.get("detection")):
         raise ValueError("AI returned an invalid Sigma rule. Retry generation.")
-    # Bind every generated condition to the selected account regardless of model output.
-    detection = rule["detection"]
-    detection["argus_account"] = {"TargetUserName": alert["user"]}
-    detection["condition"] = "(" + detection["condition"] + ") and argus_account"
+    # Detection predicates are bound to observed telemetry, never model-invented values.
+    latest = alert["rows"][-1]
+    selection = {key: latest[key] for key in ("EventID", "IpAddress", "AuthMethod") if latest.get(key) is not None}
+    rule["detection"] = {"selection": selection, "argus_account": {"TargetUserName": alert["user"]},
+                         "condition": "selection and argus_account"}
+    rule["status"] = "experimental"
+    rule["description"] = "Single-event indicator for the selected account. Investigation context: " + alert["pattern"]
     text = yaml.safe_dump(rule, sort_keys=False, allow_unicode=True)
     from sigma.rule import SigmaRule
     SigmaRule.from_yaml(text)
@@ -86,12 +89,14 @@ def generate_sigma(alert):
 
 def generate_actions(alert):
     require("write")
-    prompt = ("Return only a JSON array of 3 to 5 objects. Exact JSON keys: Possible Actions, "
+    prompt = ("Return a JSON object with one key actions containing an array of 3 to 5 objects. Exact row keys: Possible Actions, "
               "Expected Outcomes & Impact. Each value under 180 characters, English only. "
               "Give specific response steps for the selected account; distinguish proposed actions from executed outcomes. "
               "Include session revocation, disabling the account, and evidence review. "
               "Never claim any action has run. Alert: " + json.dumps({k: v for k, v in alert.items() if k != "rows"}, default=str))
-    result = json.loads(_strip_markdown_fences(soc_chat([{"role": "user", "content": prompt}], alert["rows"][-20:])))
+    result = json.loads(_strip_markdown_fences(soc_chat([{"role": "user", "content": prompt}], alert["rows"][-20:], response_format={"type": "json_object"})))
+    if isinstance(result, dict):
+        result = result.get("actions")
     if isinstance(result, list):
         for row in result:
             if isinstance(row, dict) and "Expected Outcomes & Impact" not in row:

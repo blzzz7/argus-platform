@@ -105,5 +105,6 @@ class ThreatCenterTests(unittest.TestCase):
         bind(Principal("actor", "tenant", "SOC Analyst", None))
         alert = compromised_alerts([event(1, severity="High")])[0]
         raw = [{"Possible Actions": "Revoke sessions", "Expected Outcomes": "Invalidates tokens.", "Impact": "Fresh authentication required."}]
-        with patch("modules.threat_center.soc_chat", return_value=json.dumps(raw)):
+        with patch("modules.threat_center.soc_chat", return_value=json.dumps({"actions": raw})) as chat:
             self.assertIn("Fresh authentication", generate_actions(alert)[0]["Expected Outcomes & Impact"])
+            self.assertEqual(chat.call_args.kwargs["response_format"], {"type": "json_object"})
