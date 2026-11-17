@@ -1,0 +1,55 @@
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+.streamlit/secrets.toml
+.streamlit/secrets.*.toml
+*.pem
+*.key
+*.pfx
+*.p12
+
+# Local agent instructions, design context, and review artifacts
+AGENTS.md
+CLAUDE.md
+GEMINI.md
+PRODUCT.md
+DESIGN.md
+.impeccable/
+.agents/
+.codex/
+.claude/
+
+# Telemetry, generated inputs, and reports
+argus-logs/
+data/
+logs/
+*.log
+users_wordlist.txt
+passwords_wordlist.txt
+
+# Python environments and caches
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+*.egg-info/
+build/
+dist/
+
+# Editor, OS, and temporary files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.tmp
+*.bak
+*.swp
+*~

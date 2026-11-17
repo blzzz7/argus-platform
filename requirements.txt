@@ -1,0 +1,15 @@
+streamlit
+requests
+pandas
+numpy
+python-dotenv
+fpdf2
+plotly
+reportlab
+altair
+msal
+openai
+pysigma
+supabase
+flask
+cryptography
