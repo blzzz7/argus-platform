@@ -69,7 +69,7 @@ st.markdown("""
 section[data-testid="stSidebar"] {background:#131720 !important; border-right:1px solid #344656;}
 .block-container {padding:2rem clamp(1rem, 2.4vw, 2rem) 3rem; max-width:1500px;}
 [data-testid="stMain"], [data-testid="stColumn"] {min-width:0;}
-[data-testid="stSidebar"][aria-expanded="true"] {width:252px !important; min-width:252px !important; max-width:252px !important;}
+[data-testid="stSidebar"]:is([aria-expanded="true"], [data-collapsed="false"]) {width:252px !important; min-width:252px !important; max-width:252px !important;}
 [data-testid="stSidebarHeader"] {padding:0.5rem 1rem;}
 [data-testid="stSidebarContent"] {padding-inline:8px;}
 [data-testid="stSidebarUserContent"] {padding:0 0.875rem 0.75rem;}
