@@ -54,11 +54,16 @@ class ThreatCenterTests(unittest.TestCase):
     def test_dry_run_records_audit_without_graph(self):
         app = AppTest.from_string("from modules.threat_center_ui import response_center\nfrom modules.authorization import bind, Principal\nimport streamlit as st\nbind(Principal('actor','tenant','Admin',None))\nresponse_center(st.session_state['rows'])")
         app.session_state["rows"] = [event(1, severity="High")]
+        other_lock = ("tenant", "other@example.test", "2", "block")
+        app.session_state["center_containment_attempts"] = {
+            ("tenant", "test@example.test", "1"), other_lock,
+        }
         with patch("modules.config.ENABLE_REAL_REMEDIATION", False), patch("modules.threat_center_ui.response_target") as target, patch("modules.threat_center_ui.respond_to_incident") as response, patch("modules.threat_center_ui.audit") as audit:
             app.run()
             next(b for b in app.button if b.label == "Re-enable Account").click().run()
             self.assertFalse(app.exception)
             audit.assert_called_once_with("CONTAINMENT_PREVIEW", {"user": "test@example.test", "incident_id": 1, "action": "reenable", "mode": "DRY-RUN", "status": "DRY_RUN"})
+            self.assertEqual(app.session_state["center_containment_attempts"], {other_lock})
             target.assert_not_called()
             response.assert_not_called()
 
@@ -120,6 +125,15 @@ class ThreatCenterTests(unittest.TestCase):
             self.assertTrue(next(b for b in app.button if b.label == "Disable Account").disabled)
             response.assert_called_once_with(2, "block")
             self.assertFalse(next(b for b in app.button if b.label == "Re-enable Account").disabled)
+            next(b for b in app.button if b.label == "Revoke Sessions").click().run()
+            next(b for b in app.button if b.label == "Re-enable Account").click().run()
+            self.assertTrue(next(b for b in app.button if b.label == "Re-enable Account").disabled)
+            self.assertFalse(next(b for b in app.button if b.label == "Revoke Sessions").disabled)
+            next(b for b in app.button if b.label == "Disable Account").click().run()
+            self.assertFalse(next(b for b in app.button if b.label == "Re-enable Account").disabled)
+            self.assertTrue(next(b for b in app.button if b.label == "Disable Account").disabled)
+            self.assertEqual([call.args for call in response.call_args_list],
+                             [(2, "block"), (2, "revoke"), (2, "reenable"), (2, "block")])
             app.button(key="account_alert_1").click().run()
             self.assertFalse(app.radio)
             self.assertIn("Selected", app.button(key="account_alert_1").label)

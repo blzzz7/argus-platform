@@ -111,6 +111,8 @@ def response_center(rows):
     elif not config.ENABLE_REAL_REMEDIATION:
         st.caption("Real remediation is disabled.")
     locked = st.session_state.get("center_containment_attempts", set())
+    if identity in locked:
+        locked = (locked - {identity}) | {(*identity, "block"), (*identity, "revoke")}
     if eligible:
         try:
             response_target(alert["user"])
@@ -126,21 +128,25 @@ def response_center(rows):
         columns = st.columns(3)
         for column, (action, label, effect) in zip(columns, actions):
             action_key = (*identity, action)
-            disabled = not admin or (live and (not eligible or identity in locked or action_key in locked))
+            disabled = not admin or (live and (not eligible or action_key in locked))
             if not column.button(label, disabled=disabled, width="stretch"):
                 continue
             require("remediate")
             if live:
-                st.session_state["center_containment_attempts"] = locked | {action_key}
+                locked = locked | {action_key}
+                st.session_state["center_containment_attempts"] = locked
                 st.session_state.pop("center_response", None)
                 st.session_state["center_response"] = respond_to_incident(alert["incident_id"], action)
                 st.session_state["center_response_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
-                st.rerun()
             else:
                 audit("CONTAINMENT_PREVIEW", {"user": alert["user"], "incident_id": alert["incident_id"],
                                               "action": action, "mode": "DRY-RUN", "status": "DRY_RUN"})
                 st.session_state["center_preview_effect"] = effect
-                st.rerun()
+            if action == "reenable":
+                st.session_state["center_containment_attempts"] = locked - {(*identity, "block"), (*identity, "revoke")}
+            elif action == "block":
+                st.session_state["center_containment_attempts"] = locked - {(*identity, "reenable")}
+            st.rerun()
         if not live and st.session_state.get("center_preview_effect"):
             st.info(f"DRY-RUN: This action would {st.session_state['center_preview_effect']} after eligibility checks.")
         st.caption("Revoked sessions cannot be restored (user signs in again); Re-enable restores account sign-in access.")
