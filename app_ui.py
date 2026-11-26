@@ -903,10 +903,13 @@ elif selected_menu == "Red Team Attack Controller":
     with col_left:
         st.subheader("Custom Attack Parameters")
         attack_vector = st.selectbox("Attack vector", ["User Enumeration", "Password Spray", "Brute Force", "MFA Fatigue", "Device Code Flow"], key="attack_vector")
-        default_domain = st.text_input("Target domain", config.DOMAIN or "example.onmicrosoft.com", key="attack_domain")
+        target_domain = config.DOMAIN or "example.onmicrosoft.com"
         brute_requests = st.slider("Brute Force request limit", 1, 20, 5, key="brute_requests")
         mfa_iterations = st.slider("MFA iteration limit", 1, 10, 2, key="mfa_iterations")
-        target_user_input = st.text_input("Target User (for Brute Force / MFA)", value=f"user2@{default_domain}")
+        target_user_input = st.text_input(
+            "Target User (for Brute Force / MFA)", value="",
+            placeholder="e.g. user@yourtenant.onmicrosoft.com",
+        )
         spray_password_input = st.text_input("Spray Password", value="", type="password")
         custom_brute_password = st.text_input(
             "Custom Brute Force Password (optional)",
@@ -935,7 +938,8 @@ elif selected_menu == "Red Team Attack Controller":
             language="bash"
         )
 
-    if st.button("Execute Selected Attack", disabled=attack_engine is None, key="execute_attack"):
+    missing_target = attack_vector in {"Brute Force", "MFA Fatigue"} and not target_user_input.strip()
+    if st.button("Execute Selected Attack", disabled=attack_engine is None or missing_target, key="execute_attack"):
         btn_enum, btn_spray, btn_brute, btn_mfa, btn_device = [attack_vector == name for name in ["User Enumeration", "Password Spray", "Brute Force", "MFA Fatigue", "Device Code Flow"]]
     _redteam_triggered = attack_engine is not None and (btn_enum or btn_spray or btn_brute or btn_mfa or btn_device)
     if _redteam_triggered and not require_login(
