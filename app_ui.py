@@ -785,19 +785,22 @@ elif selected_menu == "Live Log Ingestion":
     with col_reset:
         st.write("")
         st.write("")
-        if st.button('Clear / Reset Telemetry', help="Clear tenant telemetry and remediation history."):
-            if require_login(key="clear_telemetry", message="Admin access is required to clear telemetry."):
-                require("admin")
-
-                try:
-                    storage.reset_all()
-                    st.session_state['df'] = pd.DataFrame(columns=storage.EVENT_COLUMNS)
-                    st.session_state['resolved_users'] = set()
-                    st.success("Tenant telemetry and remediation history cleared.")
-                except Exception:
-                    st.error("Reset did not complete. Reload tenant data before retrying.")
-                    st.stop()
-                st.rerun()
+        try:
+            if _memberships and current().role == "Admin":
+                with st.expander("Clear / Reset Telemetry"):
+                    with st.form("confirm_telemetry_reset", clear_on_submit=True):
+                        confirmed = st.checkbox("I understand this deletes workspace telemetry and resolved-account records.")
+                        submitted = st.form_submit_button("Confirm reset")
+                    if submitted and confirmed:
+                        require("admin")
+                        storage.reset_all()
+                        st.session_state["df"] = pd.DataFrame(columns=storage.EVENT_COLUMNS)
+                        st.session_state["resolved_users"] = set()
+                        st.rerun()
+                    elif submitted:
+                        st.warning("Check the confirmation box before resetting telemetry.")
+        except Exception:
+            st.error("Reset did not complete. Reload tenant data before retrying.")
 
     if uploaded_file is not None:
         try:
@@ -904,10 +907,11 @@ elif selected_menu == "Red Team Attack Controller":
         brute_requests = st.slider("Brute Force request limit", 1, 20, 5, key="brute_requests")
         mfa_iterations = st.slider("MFA iteration limit", 1, 10, 2, key="mfa_iterations")
         target_user_input = st.text_input("Target User (for Brute Force / MFA)", value=f"user2@{default_domain}")
-        spray_password_input = st.text_input("Spray Password", value="")
+        spray_password_input = st.text_input("Spray Password", value="", type="password")
         custom_brute_password = st.text_input(
             "Custom Brute Force Password (optional)",
             value="",
+            type="password",
             help='This password is added first, before the standard wordlist.'
         )
         available_targets = max(1, len(attack_engine.users) if attack_engine else 1)
@@ -925,8 +929,9 @@ elif selected_menu == "Red Team Attack Controller":
 
         terminal_placeholder.code(
             "[+] Attack Engine Initialized...\n"
-            f"[+] Target Domain: {config.DOMAIN or '(not configured)'}\n"
-            "[*] Ready to execute authentication attempts against Entra ID.",
+            + ("[+] Tenant: connected\n" if wordlist_info and wordlist_info.get("graph_fetch_ok")
+               else "[+] Tenant: connection not verified\n")
+            + "[*] Ready to execute authentication attempts against Entra ID.",
             language="bash"
         )
 
@@ -979,7 +984,7 @@ elif selected_menu == "Red Team Attack Controller":
                             username=user, password=spray_password_input, scopes=["https://graph.microsoft.com/.default"]
                         )
                     except Exception as e:
-                        res_line = f"[-] FAILED (exception): {user} -> ({str(e)[:80]}...)"
+                        res_line = f"[-] FAILED: {user} (authentication request error)"
                         console_logs.append(res_line)
                         terminal_placeholder.code("\n".join(console_logs), language="bash")
                         new_events.append({
@@ -999,9 +1004,7 @@ elif selected_menu == "Red Team Attack Controller":
                         evt_id = 4624
                         status = "SUCCESS"
                     else:
-                        err_desc = result.get("error_description", "")
-                        err = err_desc.splitlines()[0] if err_desc else result.get("error", "unknown error")
-                        res_line = f"[-] FAILED: {user} -> ({err[:40]}...)"
+                        res_line = f"[-] FAILED: {user}"
                         evt_id = 4625
                         status = "FAILED"
 
@@ -1029,7 +1032,7 @@ elif selected_menu == "Red Team Attack Controller":
                 test_passwords = [custom_brute_password] + [
                     p for p in wordlist_sample if p != custom_brute_password
                 ]
-                console_logs.append(f"[*] Custom password added first: '{custom_brute_password}'")
+                console_logs.append("[*] Custom test password added.")
                 terminal_placeholder.code("\n".join(console_logs), language="bash")
             else:
                 test_passwords = wordlist_sample
@@ -1039,14 +1042,14 @@ elif selected_menu == "Red Team Attack Controller":
                     result = attack_engine.public_app.acquire_token_by_username_password(
                         username=target_user_input, password=pwd, scopes=["https://graph.microsoft.com/.default"]
                     )
-                except Exception as e:
-                    console_logs.append(f"[-] FAILED (exception): {pwd} -> ({str(e)[:60]}...)")
+                except Exception:
+                    console_logs.append("[-] FAILED: authentication request error.")
                     terminal_placeholder.code("\n".join(console_logs), language="bash")
                     time.sleep(1.5)
                     continue
 
                 if "access_token" in result:
-                    console_logs.append(f"[+] SUCCESS: Valid test password found -> '{pwd}'")
+                    console_logs.append("[+] SUCCESS: Test sign-in succeeded.")
                     terminal_placeholder.code("\n".join(console_logs), language="bash")
 
                     console_logs.append("\n[*] Running Post-Exploitation Reconnaissance...")
@@ -1057,9 +1060,7 @@ elif selected_menu == "Red Team Attack Controller":
                         console_logs.append(f"[+] User Info Retrieved: {u_data.get('displayName')} ({u_data.get('userPrincipalName')})")
                     break
                 else:
-                    err_desc = result.get("error_description", "")
-                    err = err_desc.splitlines()[0] if err_desc else result.get("error", "unknown error")
-                    console_logs.append(f"[-] FAILED: {pwd} -> ({err[:35]}...)")
+                    console_logs.append("[-] FAILED: Test sign-in rejected.")
                     terminal_placeholder.code("\n".join(console_logs), language="bash")
                 time.sleep(0.5)
 
@@ -1076,10 +1077,9 @@ elif selected_menu == "Red Team Attack Controller":
                         result = attack_engine.public_app.acquire_token_by_username_password(
                             username=target_user_input, password=spray_password_input, scopes=["https://graph.microsoft.com/.default"]
                         )
-                        err_desc = result.get("error_description", "")
-                        first_line = err_desc.splitlines()[0] if err_desc else "Success/Token"
-                    except Exception as e:
-                        first_line = f"exception: {str(e)[:60]}"
+                        first_line = "Sign-in succeeded." if "access_token" in result else "Sign-in was not completed."
+                    except Exception:
+                        first_line = "Authentication request error."
                     console_logs.append(f" └─ Response: {first_line[:55]}...")
                     terminal_placeholder.code("\n".join(console_logs), language="bash")
                     time.sleep(1)
@@ -1088,8 +1088,7 @@ elif selected_menu == "Red Team Attack Controller":
             console_logs.append("[*] Initiating OAuth Device Code Flow...\n")
             flow = attack_engine.public_app.initiate_device_flow(scopes=["https://graph.microsoft.com/.default"])
             if "user_code" in flow:
-                console_logs.append(f"[+] Verification URL: {flow['verification_uri']}")
-                console_logs.append(f"[+] User Code: {flow['user_code']}")
+                console_logs.append("[+] Device code flow initiated. Authorization code hidden.")
             else:
                 console_logs.append("[-] Device Code Flow initiation failed.")
             terminal_placeholder.code("\n".join(console_logs), language="bash")

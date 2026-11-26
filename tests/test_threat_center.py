@@ -4,7 +4,7 @@ from unittest.mock import patch, MagicMock
 import yaml
 from streamlit.testing.v1 import AppTest
 from modules.authorization import Principal, bind
-from modules.threat_center import compromised_alerts, canonical_route, generate_sigma, generate_actions, CENTER_ROUTE, LEGACY_ROUTES
+from modules.threat_center import compromised_alerts, compute_severity, canonical_route, generate_sigma, generate_actions, CENTER_ROUTE, LEGACY_ROUTES
 
 
 def event(i, code="4625", severity="Low", user="test@example.test"):
@@ -26,6 +26,41 @@ class ThreatCenterTests(unittest.TestCase):
 
     def test_accounts_do_not_share_failure_thresholds(self):
         self.assertEqual(compromised_alerts([event(i, user=f"user{i}@example.test") for i in range(8)]), [])
+
+    def test_shared_severity_uses_sequence_burst_and_existing_risk(self):
+        for rows, expected in [
+            ([event(i) for i in range(6)], "MEDIUM"),
+            ([event(i) for i in range(10)], "HIGH"),
+            ([event(1, severity="High")], "HIGH"),
+            ([event(1, severity="Critical")], "CRITICAL"),
+            ([event(i) for i in range(3)] + [event(4, "4624")], "CRITICAL"),
+        ]:
+            with self.subTest(severity=expected):
+                self.assertEqual(compute_severity(compromised_alerts(rows)[0]), expected)
+
+    def test_contained_accounts_use_confirmed_audit_steps_only(self):
+        from modules.db import contained_accounts
+        rows = [event(1), event(2, user="TEST@example.test"), event(3, user="preview@example.test")]
+        audit = [
+            {"action": "INCIDENT_RESPONSE", "detail": {"incident_id": 1, "action": "revoke", "http_status": 200}},
+            {"action": "INCIDENT_RESPONSE", "detail": {"incident_id": 2, "action": "block", "http_status": 204}},
+            {"action": "INCIDENT_RESPONSE", "detail": {"incident_id": 3, "action": "block", "http_status": 403}},
+            {"action": "CONTAINMENT_PREVIEW", "detail": {"user": "preview@example.test", "status": "DRY_RUN"}},
+        ]
+        with patch("modules.db.containment_audit", return_value=audit):
+            self.assertEqual(contained_accounts(rows), 1)
+            self.assertEqual(contained_accounts([]), "N/A")
+
+    def test_dry_run_records_audit_without_graph(self):
+        app = AppTest.from_string("from modules.threat_center_ui import response_center\nfrom modules.authorization import bind, Principal\nimport streamlit as st\nbind(Principal('actor','tenant','Admin',None))\nresponse_center(st.session_state['rows'])")
+        app.session_state["rows"] = [event(1, severity="High")]
+        with patch("modules.config.ENABLE_REAL_REMEDIATION", False), patch("modules.threat_center_ui.response_target") as target, patch("modules.threat_center_ui.respond_to_incident") as response, patch("modules.threat_center_ui.audit") as audit:
+            app.run()
+            next(b for b in app.button if b.label == "Preview containment (DRY-RUN)").click().run()
+            self.assertFalse(app.exception)
+            audit.assert_called_once_with("CONTAINMENT_PREVIEW", {"user": "test@example.test", "incident_id": 1, "mode": "DRY-RUN", "status": "DRY_RUN"})
+            target.assert_not_called()
+            response.assert_not_called()
 
     def test_aliases(self):
         for old in LEGACY_ROUTES:
@@ -62,6 +97,9 @@ class ThreatCenterTests(unittest.TestCase):
             next(b for b in app.button if b.label == "Generate Possible Actions").click().run()
             self.assertEqual(len(app.checkbox), 0)
             next(b for b in app.button if b.label == "Revoke Sessions & Disable Account").click().run()
+            response.assert_called_once_with(2, "both")
+            app.run()
+            self.assertTrue(next(b for b in app.button if b.label == "Revoke Sessions & Disable Account").disabled)
             response.assert_called_once_with(2, "both")
             app.button(key="account_alert_1").click().run()
             self.assertFalse(app.radio)

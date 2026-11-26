@@ -7,6 +7,35 @@ from modules.ai_generator import soc_chat, _strip_markdown_fences, _detection_is
 
 CENTER_ROUTE = "Threat Response & AI Center"
 LEGACY_ROUTES = {"AI Threat Analysis & Auto-Fix", "Interactive Analytics", "Threat Detection Engine"}
+MITRE_TECHNIQUES = {
+    "passwordspray": ("T1110.003 Password Spraying", "credential_access"),
+    "bruteforce": ("T1110.001 Password Guessing", "credential_access"),
+    "userenumeration": ("T1087.004 Account Discovery: Cloud Account", "discovery"),
+    "mfafatigue": ("T1621 MFA Request Generation", "credential_access"),
+    "devicecode": ("T1528 Steal Application Access Token", "credential_access"),
+    "success_after": ("T1078.004 Valid Accounts: Cloud Accounts", "initial_access"),
+}
+
+
+def compute_severity(alert):
+    risks = {str(row.get("severity", "")).lower() for row in alert["rows"]}
+    if alert["success_after"] or "critical" in risks:
+        return "CRITICAL"
+    if alert["failure_peak"] >= 10 or "high" in risks:
+        return "HIGH"
+    return "MEDIUM"
+
+
+def mitre_techniques(alert):
+    methods = {
+        "".join(ch for ch in str(row.get(field, "")).lower() if ch.isalnum())
+        for row in alert["rows"] for field in ("AuthMethod", "attack_type")
+    }
+    if "devicecodeflow" in methods:
+        methods.add("devicecode")
+    if alert["success_after"]:
+        methods.add("success_after")
+    return [value for key, value in MITRE_TECHNIQUES.items() if key in methods]
 
 
 def canonical_route(route):
@@ -49,7 +78,7 @@ def compromised_alerts(rows):
         if success_after:
             reasons.append("Success after 3+ consecutive failures")
         if peak > 5:
-            reasons.append("Rolling five-minute failure threshold")
+            reasons.append(f"{peak} failed sign-ins in five minutes")
         if high:
             reasons.append("High / Critical risk")
         alerts.append({"user": representative["TargetUserName"], "incident_id": representative.get("id"),
@@ -57,6 +86,7 @@ def compromised_alerts(rows):
                        "failed": sum(str(r.get("EventID")) == "4625" for r in evidence),
                        "success": sum(str(r.get("EventID")) == "4624" for r in evidence),
                        "pattern": "; ".join(reasons), "timestamp": str(stamp(representative)),
+                       "success_after": success_after, "failure_peak": peak,
                        "rows": ordered or evidence})
     return sorted(alerts, key=lambda a: (a["timestamp"], a["user"]), reverse=True)
 
@@ -79,11 +109,24 @@ def generate_sigma(alert):
     selection = {key: latest[key] for key in ("EventID", "IpAddress", "AuthMethod") if latest.get(key) is not None}
     rule["detection"] = {"selection": selection, "argus_account": {"TargetUserName": alert["user"]},
                          "condition": "selection and argus_account"}
+    rule.pop("tags", None)
     rule["status"] = "experimental"
     rule["description"] = "Single-event indicator for the selected account. Investigation context: " + alert["pattern"]
     text = yaml.safe_dump(rule, sort_keys=False, allow_unicode=True)
     from sigma.rule import SigmaRule
     SigmaRule.from_yaml(text)
+    tags = list(dict.fromkeys(
+        tag for label, tactic in mitre_techniques(alert)
+        for tag in (f"attack.{tactic}", f"attack.{label.split()[0].lower()}")
+    ))
+    if tags:
+        rule["tags"] = tags
+        tagged_text = yaml.safe_dump(rule, sort_keys=False, allow_unicode=True)
+        try:
+            SigmaRule.from_yaml(tagged_text)
+        except Exception:
+            return text
+        return tagged_text
     return text
 
 

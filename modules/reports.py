@@ -5,15 +5,17 @@ from reportlab.lib import colors
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 from reportlab.lib.pagesizes import landscape, A4
+from modules.threat_center import compromised_alerts, compute_severity
 
 
 def build_report(records, summary, tenant_id, period):
     styles = getSampleStyleSheet()
     columns = ["Timestamp", "Target UPN", "Attack vector", "Severity", "Response"]
-    values = [[str(row.get("created_at", "")), str(row.get("TargetUserName", "")), str(row.get("attack_type") or row.get("AuthMethod", "Unknown")), str(row.get("severity", "Unknown")), str(row.get("status", "New")) + ": " + str(row.get("action_taken") or "None")] for row in records]
-    high = sum(str(row.get("severity", "")).lower() in {"high", "critical"} for row in records)
+    severity_by_user = {str(a["user"]).casefold(): compute_severity(a) for a in compromised_alerts(records)}
+    values = [[str(row.get("created_at", "")), str(row.get("TargetUserName", "")), str(row.get("attack_type") or row.get("AuthMethod", "Unknown")), severity_by_user.get(str(row.get("TargetUserName", "")).casefold(), str(row.get("severity", "Unknown"))), str(row.get("status", "New")) + ": " + str(row.get("action_taken") or "None")] for row in records]
+    high = sum(severity in {"HIGH", "CRITICAL"} for severity in severity_by_user.values())
     unresolved = sum(row.get("status") != "Remediated" for row in records)
-    recommendations = f"Review {unresolved} unresolved records. Prioritize {high} high or critical records. Validate MFA and conditional access for observed target accounts. Retain response evidence for compliance review; telemetry alone does not establish compliance."
+    recommendations = f"Review {unresolved} unresolved records. Prioritize {high} high or critical accounts. Validate MFA and conditional access for observed target accounts. Retain response evidence for compliance review; telemetry alone does not establish compliance."
     heading = "Argus ITDR Security Audit Report"
     metadata = f"Tenant: {tenant_id} | Period: {period} | Records: {len(records)}"
     markup = "<h1>" + heading + "</h1><p>" + escape(metadata) + "</p><h2>Executive Summary</h2><p>" + escape(summary) + "</p><h2>Incident Breakdown</h2><table><thead><tr>" + "".join("<th>" + c + "</th>" for c in columns) + "</tr></thead><tbody>" + "".join("<tr>" + "".join("<td>" + escape(cell) + "</td>" for cell in row) + "</tr>" for row in values) + "</tbody></table><h2>Compliance &amp; Posture Recommendations</h2><p>" + escape(recommendations) + "</p>"

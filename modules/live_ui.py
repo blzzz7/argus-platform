@@ -1,23 +1,20 @@
 """Live SOC workflows; Streamlit stays a thin presentation layer."""
-import json
 from datetime import datetime, time, timedelta, timezone
 import pandas as pd
 import plotly.express as px
 import streamlit as st
 from modules.authorization import current, require
-from modules.db import incident_records
-from modules.detection import evaluate
-from modules.ai_generator import soc_chat
+from modules.db import incident_records, contained_accounts
+from modules.threat_center import compromised_alerts, compute_severity
 from modules.connectors.live import health_checks, pipeline_test
-from modules.remediation import respond_to_incident
 from modules.reports import build_report
 
 
 def records():
     try:
         return incident_records()
-    except Exception as error:
-        st.error(str(error))
+    except Exception:
+        st.error("Workspace data or a configured service is unavailable.")
         return None
 
 
@@ -36,10 +33,19 @@ def dashboard(rows):
     if rows is None:
         return
     st.caption("Tenant-scoped Supabase records. Session telemetry appears separately until persisted.")
-    metrics = st.columns(3)
-    metrics[0].metric("Total detected incidents", len(rows))
-    metrics[1].metric("High / Critical threats", sum(str(r.get("severity", "")).lower() in {"high", "critical"} for r in rows))
-    metrics[2].metric("Auto-remediated accounts", len({r.get("TargetUserName") for r in rows if r.get("action_taken") in {"Blocked", "Revoked", "Session Revoked & Account Blocked"} or r.get("status") in {"Blocked", "Revoked"}}))
+    try:
+        contained = contained_accounts(rows)
+    except Exception:
+        contained = "N/A"
+    try:
+        alerts = compromised_alerts(rows)
+        metrics = st.columns(4)
+        metrics[0].metric("Total events", len(rows))
+        metrics[1].metric("Detected incidents", len(alerts))
+        metrics[2].metric("High / Critical threats", sum(compute_severity(a) in {"HIGH", "CRITICAL"} for a in alerts))
+        metrics[3].metric("Contained accounts (admin-approved)", contained)
+    except Exception:
+        st.info("Dashboard metrics are unavailable.")
     if not rows:
         st.info("No incidents recorded. Ingest tenant telemetry to begin monitoring.")
         return
@@ -79,16 +85,14 @@ def report():
     if st.button("Generate audit report"):
         try:
             rows = incident_records(datetime.combine(start, time.min, timezone.utc).isoformat(), datetime.combine(end + timedelta(days=1), time.min, timezone.utc).isoformat())
-            summary = f"The selected period contains {len(rows)} tenant incident records. AI executive summary unavailable."
-            if current().role != "Read-Only Auditor" and rows:
-                try:
-                    summary = soc_chat([{"role": "user", "content": f"Write an executive summary and evidence-based recommendations. Full period aggregates: {json.dumps(report_aggregates(rows))}. The context is a sample of at most 20 records; do not infer population statistics from that sample."}], rows)
-                except Exception as error:
-                    st.warning("AI summary unavailable: " + str(error))
+            totals = report_aggregates(rows)
+            summary = (f"The selected period contains {totals['total_records']} events across "
+                       f"{totals['targeted_users']} accounts. {totals['high_critical']} flagged accounts "
+                       "have High or Critical severity.")
             html, pdf = build_report(rows, summary, current().tenant_id, f"{start} to {end}")
             st.session_state["live_report"] = {"html": html, "pdf": pdf}
-        except Exception as error:
-            st.error(str(error))
+        except Exception:
+            st.error("The security audit report could not be generated.")
     result = st.session_state.get("live_report")
     if result:
         import streamlit.components.v1 as components
@@ -108,11 +112,12 @@ def render(route):
                 st.caption("Sends a real test alert. Confirms its UUID through the tenant's Wazuh index after two seconds.")
                 if st.button("Send Test Event to SIEM"):
                     result = pipeline_test()
-                    st.json(result)
+                    st.json({"confirmed": result["confirmed"], "latency_ms": result["latency_ms"],
+                             "test_event_id": result["payload"]["id"]})
                     if result["confirmed"]:
                         st.success(f"Indexing confirmed · {result['latency_ms']} ms")
                     else:
-                        st.warning("Delivery completed; indexing is not confirmed. Inspect the raw audit response and retry.")
+                        st.warning("Delivery completed; indexing is not confirmed. Check Wazuh indexing before retrying.")
             else:
                 st.button("Test Connections")
                 for name, result in health_checks().items():
@@ -128,8 +133,8 @@ def render(route):
             dashboard(rows)
         else:
             response_center(rows)
-    except Exception as error:
-        st.error(str(error))
+    except Exception:
+        st.error("Workspace data or a configured service is unavailable.")
 
 
 
@@ -156,16 +161,17 @@ def integration_editor():
             key = st.text_input("Shared key (leave blank to retain saved key)", type="password")
             settings = {"workspace_id": workspace, "shared_key": key or existing.get("shared_key", "")}
         if st.form_submit_button("Save connector"):
-            ok, error = integrations.save_integration(provider, provider.title(), settings, enabled)
+            ok, _ = integrations.save_integration(provider, provider.title(), settings, enabled)
             if ok:
                 st.success("Tenant connector saved.")
             else:
-                st.error(error)
+                st.error("The connector could not be saved. Check its configuration.")
     if provider in {"splunk", "sentinel"} and record.get("enabled") and st.button("Send connector test event"):
         from uuid import uuid4
         event = {"id": str(uuid4()), "tenant_id": current().tenant_id, "timestamp": datetime.now(timezone.utc).isoformat(), "source": "argus-siem-test", "event_id": 4625}
-        st.success(dispatch(event, provider, existing))
+        dispatch(event, provider, existing)
+        st.success("Connector test event delivered.")
 
 
 def report_aggregates(rows):
-    return {"total_records": len(rows), "high_critical": sum(str(r.get("severity", "")).lower() in {"high", "critical"} for r in rows), "remediated": sum(r.get("status") == "Remediated" for r in rows), "targeted_users": len({r.get("TargetUserName") for r in rows if r.get("TargetUserName")})}
+    return {"total_records": len(rows), "high_critical": sum(compute_severity(a) in {"HIGH", "CRITICAL"} for a in compromised_alerts(rows)), "remediated": sum(r.get("status") == "Remediated" for r in rows), "targeted_users": len({r.get("TargetUserName") for r in rows if r.get("TargetUserName")})}

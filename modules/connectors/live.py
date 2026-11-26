@@ -36,7 +36,7 @@ def health_checks():
         from modules.graph_client import GraphClient, secrets
         settings = secrets()
         GraphClient(settings)
-        return "Connected (Tenant ID: " + settings["entra_tenant_id"] + ")"
+        return "Connected (Tenant ID: " + str(settings["entra_tenant_id"])[:8] + "\u2026)"
     def bridge():
         result = bridge_request("GET", "/health")
         if not result.get("ok") or not result.get("wazuh_reachable") or result.get("tenant_id") != p.tenant_id:
@@ -50,8 +50,8 @@ def health_checks():
     for name, probe in {"Microsoft Entra ID": graph, "Local Log Bridge & Wazuh": bridge, "Supabase Database": database, "Groq AI Engine": groq}.items():
         try:
             results[name] = {"ok": True, "detail": probe()}
-        except Exception as error:
-            results[name] = {"ok": False, "detail": str(error)}
+        except Exception:
+            results[name] = {"ok": False, "detail": "Unavailable. Check credentials and connectivity."}
     return results
 
 

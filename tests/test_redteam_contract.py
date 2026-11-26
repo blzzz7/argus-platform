@@ -86,6 +86,10 @@ class RedTeamContract(unittest.TestCase):
                 if isinstance(node, ast.Call) and ast.unparse(node.func) in {"st.button", "st.text_input", "st.slider"}:
                     if any(k.arg == "key" and isinstance(k.value, ast.Constant) and k.value.value in {"attack_domain", "brute_requests", "mfa_iterations", "execute_attack"} for k in node.keywords):
                         continue
+                    password_fields = {"Spray Password", "Custom Brute Force Password (optional)"}
+                    if ast.unparse(node.func) == "st.text_input" and node.args and isinstance(node.args[0], ast.Constant) and node.args[0].value in password_fields:
+                        self.assertTrue(any(k.arg == "type" and ast.literal_eval(k.value) == "password" for k in node.keywords))
+                        node.keywords = [k for k in node.keywords if k.arg != "type"]
                     node.keywords = [k for k in node.keywords if k.arg != "help"]
                     widgets.append(ast.dump(node, include_attributes=False))
         # Display labels may lose decorative icons; all other widget arguments stay frozen.
