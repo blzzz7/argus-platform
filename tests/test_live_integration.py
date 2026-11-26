@@ -158,3 +158,28 @@ class LiveIntegrationTests(unittest.TestCase):
         self.assertTrue(all(call.args[1] == TENANT for call in query.eq.call_args_list if call.args[0] == "tenant_id"))
         self.assertEqual(query.update.call_args.args[0]["action_taken"], "Session Revoked & Account Blocked")
         self.assertEqual(graph.request.call_args_list[1].args, ("PATCH", "users/target", {"accountEnabled": False}))
+
+    def test_individual_incident_actions_dispatch_one_graph_request(self):
+        cases = {
+            "revoke": ("POST", "users/target/revokeSignInSessions", {}),
+            "block": ("PATCH", "users/target", {"accountEnabled": False}),
+            "reenable": ("PATCH", "users/target", {"accountEnabled": True}),
+        }
+        for action, request in cases.items():
+            with self.subTest(action=action):
+                client = MagicMock()
+                query = client.table.return_value
+                for method in ("select", "eq", "update", "insert"):
+                    getattr(query, method).return_value = query
+                query.execute.return_value.data = [{"id": 7, "TargetUserName": "target@example.test"}]
+                bind(Principal("actor", TENANT, "Admin", client))
+                graph = MagicMock(last_status=200)
+                graph.resolve.side_effect = [{"id": "target"}, {"id": "protected"}]
+                graph.request.return_value = {"value": True} if action == "revoke" else {}
+                with patch("modules.remediation.config.ENABLE_REAL_REMEDIATION", True), patch("modules.remediation.secrets", return_value={"protected_accounts": ["emergency@example.test"]}), patch("modules.remediation.GraphClient", return_value=graph):
+                    result = respond_to_incident(7, action)
+                graph.request.assert_called_once_with(*request)
+                self.assertEqual(result[0]["action"], action)
+                detail = query.insert.call_args.args[0]["detail"]
+                self.assertEqual((detail["action"], detail["http_status"], detail["user"]),
+                                 (action, 200, "target@example.test"))

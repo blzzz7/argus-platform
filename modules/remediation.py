@@ -87,7 +87,7 @@ def respond_to_incident(incident_id, action):
     p = require("remediate")
     if not config.ENABLE_REAL_REMEDIATION:
         raise RuntimeError("Real remediation is disabled. Set ENABLE_REAL_REMEDIATION=true explicitly to execute Graph actions.")
-    if action not in {"revoke", "block", "both"}:
+    if action not in {"revoke", "block", "both", "reenable"}:
         raise ValueError("Unknown response action.")
     rows = p.client.table("events").select("*").eq("tenant_id", p.tenant_id).eq("id", incident_id).execute().data
     if not rows:
@@ -96,11 +96,16 @@ def respond_to_incident(incident_id, action):
     path = "users/" + quote(target["id"], safe="")
     responses = []
     for step in (["revoke", "block"] if action == "both" else [action]):
-        result = graph.request("POST" if step == "revoke" else "PATCH", path + "/revokeSignInSessions" if step == "revoke" else path, {} if step == "revoke" else {"accountEnabled": False})
+        if step == "revoke":
+            result = graph.request("POST", path + "/revokeSignInSessions", {})
+        else:
+            result = graph.request("PATCH", path, {"accountEnabled": step == "reenable"})
         if step == "revoke" and result.get("value") is not True:
             raise RuntimeError("Graph did not confirm session revocation.")
         responses.append({"action": step, "http_status": graph.last_status, "response": result})
         values = {"status": "Remediated" if action != "both" or step == "block" else "Partially Remediated", "action_taken": "Session Revoked & Account Blocked" if action == "both" and step == "block" else "Revoked" if step == "revoke" else "Blocked"}
+        if step == "reenable":
+            values = {"status": "Reopened", "action_taken": "Account Re-enabled"}
         p.client.table("events").update(values).eq("tenant_id", p.tenant_id).eq("id", incident_id).execute()
-        p.client.table("audit_events").insert({"tenant_id": p.tenant_id, "actor_id": p.user_id, "action": "INCIDENT_RESPONSE", "detail": {"incident_id": incident_id, **responses[-1]}}).execute()
+        p.client.table("audit_events").insert({"tenant_id": p.tenant_id, "actor_id": p.user_id, "action": "INCIDENT_RESPONSE", "detail": {"incident_id": incident_id, "user": rows[0]["TargetUserName"], **responses[-1]}}).execute()
     return responses

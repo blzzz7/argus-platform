@@ -56,11 +56,29 @@ class ThreatCenterTests(unittest.TestCase):
         app.session_state["rows"] = [event(1, severity="High")]
         with patch("modules.config.ENABLE_REAL_REMEDIATION", False), patch("modules.threat_center_ui.response_target") as target, patch("modules.threat_center_ui.respond_to_incident") as response, patch("modules.threat_center_ui.audit") as audit:
             app.run()
-            next(b for b in app.button if b.label == "Preview containment (DRY-RUN)").click().run()
+            next(b for b in app.button if b.label == "Re-enable Account").click().run()
             self.assertFalse(app.exception)
-            audit.assert_called_once_with("CONTAINMENT_PREVIEW", {"user": "test@example.test", "incident_id": 1, "mode": "DRY-RUN", "status": "DRY_RUN"})
+            audit.assert_called_once_with("CONTAINMENT_PREVIEW", {"user": "test@example.test", "incident_id": 1, "action": "reenable", "mode": "DRY-RUN", "status": "DRY_RUN"})
             target.assert_not_called()
             response.assert_not_called()
+
+    def test_containment_badges_follow_successful_live_account_state(self):
+        from modules.threat_center import containment_badges
+        def audit(action, **fields):
+            return {"action": "INCIDENT_RESPONSE", "detail": {
+                "incident_id": 1, "action": action, "http_status": 204, **fields,
+            }}
+        rows = [event(1)]
+        user = "test@example.test"
+        blocked = audit("block")
+        restored = audit("reenable", user="TEST@example.test")
+        revoked = audit("revoke")
+        self.assertEqual(containment_badges([revoked], rows), {user: "Sessions Revoked"})
+        self.assertEqual(containment_badges([revoked, blocked], rows), {user: "Contained (Disabled)"})
+        self.assertEqual(containment_badges([restored, blocked, revoked], rows), {})
+        self.assertEqual(containment_badges([revoked, restored, blocked], rows), {user: "Sessions Revoked"})
+        self.assertEqual(containment_badges([audit("reenable", mode="DRY-RUN"), audit("reenable", http_status=403), blocked], rows),
+                         {user: "Contained (Disabled)"})
 
     def test_aliases(self):
         for old in LEGACY_ROUTES:
@@ -96,11 +114,12 @@ class ThreatCenterTests(unittest.TestCase):
             self.assertEqual(app.code[0].value, "title: test")
             next(b for b in app.button if b.label == "Generate Possible Actions").click().run()
             self.assertEqual(len(app.checkbox), 0)
-            next(b for b in app.button if b.label == "Revoke Sessions & Disable Account").click().run()
-            response.assert_called_once_with(2, "both")
+            next(b for b in app.button if b.label == "Disable Account").click().run()
+            response.assert_called_once_with(2, "block")
             app.run()
-            self.assertTrue(next(b for b in app.button if b.label == "Revoke Sessions & Disable Account").disabled)
-            response.assert_called_once_with(2, "both")
+            self.assertTrue(next(b for b in app.button if b.label == "Disable Account").disabled)
+            response.assert_called_once_with(2, "block")
+            self.assertFalse(next(b for b in app.button if b.label == "Re-enable Account").disabled)
             app.button(key="account_alert_1").click().run()
             self.assertFalse(app.radio)
             self.assertIn("Selected", app.button(key="account_alert_1").label)
@@ -158,7 +177,9 @@ class ThreatCenterTests(unittest.TestCase):
         app.session_state["rows"] = [event(1, severity="High")]
         with patch("modules.config.ENABLE_REAL_REMEDIATION", True), patch("modules.threat_center_ui.response_target", side_effect=PermissionError("Protected account cannot be remediated.")), patch("modules.threat_center_ui.respond_to_incident") as response:
             app.run()
-            self.assertTrue(next(b for b in app.button if b.label == "Revoke Sessions & Disable Account").disabled)
+            actions = [b for b in app.button if b.label in {"Revoke Sessions", "Disable Account", "Re-enable Account"}]
+            self.assertEqual(len(actions), 3)
+            self.assertTrue(all(b.disabled for b in actions))
             self.assertIn("test@example.test", app.button(key="account_alert_0").label)
             self.assertEqual(len(app.checkbox), 0)
             response.assert_not_called()

@@ -26,6 +26,36 @@ def compute_severity(alert):
     return "MEDIUM"
 
 
+def containment_badges(audit_rows, records):
+    """Derive badges from newest-first confirmed live incident responses."""
+    users = {str(row.get("id")): row.get("TargetUserName") for row in records}
+    badges = {}
+    account_states = set()
+    for entry in audit_rows:
+        if entry.get("action") != "INCIDENT_RESPONSE":
+            continue
+        detail = entry.get("detail") or {}
+        status = detail.get("http_status")
+        if (detail.get("simulation") or detail.get("mode", "LIVE") != "LIVE"
+                or detail.get("status", "SUCCEEDED") != "SUCCEEDED"
+                or not isinstance(status, int) or not 200 <= status < 300):
+            continue
+        user = detail.get("user") or users.get(str(detail.get("incident_id")))
+        action = detail.get("action")
+        if not user or action not in {"revoke", "block", "reenable"}:
+            continue
+        key = str(user).casefold()
+        if key in account_states:
+            continue
+        if action == "revoke":
+            badges.setdefault(key, "Sessions Revoked")
+        else:
+            account_states.add(key)
+            if action == "block":
+                badges[key] = "Contained (Disabled)"
+    return badges
+
+
 def mitre_techniques(alert):
     methods = {
         "".join(ch for ch in str(row.get(field, "")).lower() if ch.isalnum())

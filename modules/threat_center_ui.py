@@ -5,7 +5,7 @@ import streamlit as st
 from modules.authorization import audit, current, require
 from modules.db import containment_audit
 from modules.remediation import respond_to_incident, response_target
-from modules.threat_center import compute_severity, mitre_techniques
+from modules.threat_center import compute_severity, containment_badges, mitre_techniques
 
 
 def response_center(rows):
@@ -33,19 +33,35 @@ def response_center(rows):
     clicked = st.session_state.pop("center_clicked_alert", None)
     if clicked in identities:
         selected_index = identities.index(clicked)
+    audit_rows = []
+    badges = {}
+    try:
+        audit_rows = containment_audit()
+        badges = containment_badges(audit_rows, rows)
+    except Exception:
+        pass
+
     try:
         with st.container(key="account_alerts"):
             st.subheader("Compromised User Alerts")
+            st.markdown(
+                '<style>.st-key-account_alerts [class*="st-key-contained_alert_"] button'
+                '{border-color:#426351;}</style>',
+                unsafe_allow_html=True,
+            )
             for index, item in enumerate(alerts):
                 active = index == selected_index
                 user = re.sub(r"([^\w@.+-])", r"\\\1", " ".join(str(item["user"]).split()))
                 ip = re.sub(r"([^\w.:+-])", r"\\\1", " ".join(str(item["source_ip"]).split()))
+                badge = badges.get(str(item["user"]).casefold())
+                status = f" :green-badge[{badge}]" if badge else ""
+                alert_key = "contained_alert" if badge == "Contained (Disabled)" else "account_alert"
                 st.button(
                     f"**{user}**{' · Selected' if active else ''}  \n"
-                    f"*{compute_severity(item).title()}* · Why flagged: {item['pattern']}  \n"
+                    f"*{compute_severity(item).title()}*{status} · Why flagged: {item['pattern']}  \n"
                     f"Source IP {ip} · Failed {item['failed']} · Success {item['success']}"
                     + "".join(f"  \n`{label}`" for label, _ in mitre_techniques(item)),
-                    key=f"account_alert_{index}",
+                    key=f"{alert_key}_{index}",
                     type="primary" if active else "secondary",
                     on_click=select_alert,
                     args=(index,),
@@ -61,6 +77,7 @@ def response_center(rows):
         st.session_state.pop("center_sigma", None)
         st.session_state.pop("center_actions", None)
         st.session_state.pop("center_response", None)
+        st.session_state.pop("center_preview_effect", None)
     st.caption(f"Selected alert timestamp (UTC) · {alert['timestamp']}")
     writable = current().role in {"Admin", "SOC Analyst"}
     st.subheader("AI Sigma Rule Generator")
@@ -86,28 +103,49 @@ def response_center(rows):
             st.caption("LIVE" if mode.startswith("Live") else "DRY-RUN")
     except Exception:
         st.caption("Containment mode is unavailable.")
-    live = mode.startswith("Live") and alert["incident_id"] is not None
-    if current().role != "Admin":
+    admin = current().role == "Admin"
+    live = admin and mode.startswith("Live")
+    eligible = live and alert["incident_id"] is not None
+    if not admin:
         st.caption("Admin access required.")
     elif not config.ENABLE_REAL_REMEDIATION:
         st.caption("Real remediation is disabled.")
     locked = st.session_state.get("center_containment_attempts", set())
-    if identity in locked:
-        live = False
-        st.caption("A live response was already requested for this incident in this session. Review the audit before retrying.")
-    if live:
+    if eligible:
         try:
             response_target(alert["user"])
         except Exception:
-            live = False
+            eligible = False
             st.caption("The target could not be cleared for containment. Check protected accounts and Graph configuration.")
-    if st.button("Revoke Sessions & Disable Account", disabled=not live, width="content"):
-        try:
-            st.session_state["center_containment_attempts"] = locked | {identity}
-            st.session_state["center_response"] = respond_to_incident(alert["incident_id"], "both")
-            st.session_state["center_response_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        except Exception:
-            st.error("Containment did not fully complete. Check Graph and the audit trail before retrying.")
+    actions = [
+        ("revoke", "Revoke Sessions", "revoke sign-in sessions"),
+        ("block", "Disable Account", "disable account sign-in"),
+        ("reenable", "Re-enable Account", "restore account sign-in"),
+    ]
+    try:
+        columns = st.columns(3)
+        for column, (action, label, effect) in zip(columns, actions):
+            action_key = (*identity, action)
+            disabled = not admin or (live and (not eligible or identity in locked or action_key in locked))
+            if not column.button(label, disabled=disabled, width="stretch"):
+                continue
+            require("remediate")
+            if live:
+                st.session_state["center_containment_attempts"] = locked | {action_key}
+                st.session_state.pop("center_response", None)
+                st.session_state["center_response"] = respond_to_incident(alert["incident_id"], action)
+                st.session_state["center_response_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+                st.rerun()
+            else:
+                audit("CONTAINMENT_PREVIEW", {"user": alert["user"], "incident_id": alert["incident_id"],
+                                              "action": action, "mode": "DRY-RUN", "status": "DRY_RUN"})
+                st.session_state["center_preview_effect"] = effect
+                st.rerun()
+        if not live and st.session_state.get("center_preview_effect"):
+            st.info(f"DRY-RUN: This action would {st.session_state['center_preview_effect']} after eligibility checks.")
+        st.caption("Revoked sessions cannot be restored (user signs in again); Re-enable restores account sign-in access.")
+    except Exception:
+        st.error("The response could not be confirmed. Review the containment audit before retrying.")
     try:
         if st.session_state.get("center_response"):
             st.text(f"Target: {alert['user']} | Admin: {current().user_id} | UTC: {st.session_state.get('center_response_at', '')}")
@@ -117,17 +155,9 @@ def response_center(rows):
     except Exception:
         st.caption("Response details are unavailable. Review the containment audit.")
     try:
-        if current().role == "Admin" and mode.startswith("Dry-run") and st.button("Preview containment (DRY-RUN)", width="content"):
-            require("remediate")
-            audit("CONTAINMENT_PREVIEW", {"user": alert["user"], "incident_id": alert["incident_id"],
-                                          "mode": "DRY-RUN", "status": "DRY_RUN"})
-            st.info("DRY-RUN: Live containment would revoke sign-in sessions and disable this account after eligibility checks.")
-    except Exception:
-        st.error("The dry-run audit could not be saved. No Graph changes were requested.")
-    try:
         users = {str(row.get("id")): row.get("TargetUserName") for row in rows}
         entries = []
-        for entry in containment_audit(limit=20):
+        for entry in audit_rows[:20]:
             detail = entry.get("detail") or {}
             preview = entry["action"] == "CONTAINMENT_PREVIEW"
             entries.append({
