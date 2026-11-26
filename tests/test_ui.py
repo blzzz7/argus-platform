@@ -22,6 +22,20 @@ class UIWorkflowTests(unittest.TestCase):
     def tearDown(self):
         bind(None)
 
+    def test_guest_copilot_and_privacy_navigation(self):
+        app = AppTest.from_file(str(APP)).run(timeout=30)
+        next(button for button in app.button if button.label == "AI Copilot").click().run()
+        self.assertTrue(any(item.value == "AI Copilot" for item in app.subheader))
+        self.assertFalse(app.chat_input)
+        next(button for button in app.button if button.label == "Close").click().run()
+        self.assertFalse(any(item.value == "AI Copilot" for item in app.subheader))
+        app.query_params["page"] = "privacy"
+        app.run()
+        self.assertEqual(app.title[0].value, "Privacy Policy")
+        self.assertTrue(any("Microsoft Entra ID & Graph API Permissions" in item.value for item in app.markdown))
+        app.button(key="privacy_back").click().run()
+        self.assertEqual(app.title[0].value, "Argus ITDR SOC Workspace")
+
     def test_guest_workspace_and_create_workspace_route(self):
         app = AppTest.from_file(str(APP)).run(timeout=30)
         self.assertFalse(app.exception)

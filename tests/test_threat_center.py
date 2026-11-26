@@ -63,7 +63,12 @@ class ThreatCenterTests(unittest.TestCase):
             self.assertEqual(len(app.checkbox), 0)
             next(b for b in app.button if b.label == "Revoke Sessions & Disable Account").click().run()
             response.assert_called_once_with(2, "both")
-            app.radio[0].set_value("test@example.test").run()
+            app.button(key="account_alert_1").click().run()
+            self.assertFalse(app.radio)
+            self.assertIn("Selected", app.button(key="account_alert_1").label)
+            self.assertIn("test@example.test", app.button(key="account_alert_1").label)
+            self.assertNotIn("center_response", app.session_state)
+            self.assertNotIn("center_actions", app.session_state)
             self.assertEqual(len(app.checkbox), 0)
             self.assertEqual(len(app.code), 0)
 
@@ -72,7 +77,8 @@ class ThreatCenterTests(unittest.TestCase):
         app.session_state["rows"] = [event(1, severity="High")]
         app.run()
         self.assertFalse(app.exception)
-        self.assertTrue(all(b.disabled for b in app.button))
+        self.assertFalse(app.button(key="account_alert_0").disabled)
+        self.assertTrue(all(b.disabled for b in app.button if b.key != "account_alert_0"))
         self.assertEqual(len(app.checkbox), 0)
 
     def test_legacy_query_routes_redirect(self):
@@ -115,6 +121,6 @@ class ThreatCenterTests(unittest.TestCase):
         with patch("modules.config.ENABLE_REAL_REMEDIATION", True), patch("modules.threat_center_ui.response_target", side_effect=PermissionError("Protected account cannot be remediated.")), patch("modules.threat_center_ui.respond_to_incident") as response:
             app.run()
             self.assertTrue(next(b for b in app.button if b.label == "Revoke Sessions & Disable Account").disabled)
-            self.assertEqual(app.radio[0].options, ["test@example.test"])
+            self.assertIn("test@example.test", app.button(key="account_alert_0").label)
             self.assertEqual(len(app.checkbox), 0)
             response.assert_not_called()

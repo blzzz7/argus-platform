@@ -86,7 +86,7 @@ class WorkspaceTests(unittest.TestCase):
         from streamlit.testing.v1 import AppTest
         engine = MagicMock()
         engine.users = ["user13@example.test", "fake_user_1@example.test"]
-        fake = SimpleNamespace(DOMAIN="example.test", IdentityAttackEngine=MagicMock(return_value=engine), USERS_FILE="synthetic-users", PASSWORDS_FILE="synthetic-passwords", generate_wordlists=MagicMock(return_value=None))
+        fake = SimpleNamespace(DOMAIN="example.test", IdentityAttackEngine=MagicMock(return_value=engine), USERS_FILE="synthetic-users", PASSWORDS_FILE="synthetic-passwords", generate_wordlists=MagicMock(return_value={"graph_fetch_ok": True, "real_user_count": 1}))
         def restore(state):
             state.update(authenticated=True, auth_username="admin", auth_role="Admin", active_tenant_id="local")
             bind(Principal("actor", "local", "Admin", None, local_admin=True))
@@ -102,6 +102,10 @@ class WorkspaceTests(unittest.TestCase):
             self.assertTrue(any(item.label == "Execute Selected Attack" and not item.disabled for item in app.button))
             self.assertFalse(any("Guest preview" in item.value for item in app.caption))
             limit = next(item for item in app.number_input if item.label == "Max Target Limit")
-            self.assertEqual(limit.value, len(engine.users))
+            self.assertEqual(limit.value, 1)
+            self.assertEqual(limit.max, len(engine.users))
+            self.assertFalse(any("Identity source:" in item.value for item in app.success))
+            self.assertFalse(any("Simulation / Sandbox Mode" in item.value for item in app.warning))
+            self.assertFalse(any("Events use" in item.value for item in app.caption))
             self.assertIn("user13@example.test", engine.users)
             engine.public_app.acquire_token_by_username_password.assert_not_called()

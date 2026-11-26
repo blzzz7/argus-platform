@@ -1,5 +1,5 @@
 """Compact account response workspace with native Streamlit controls."""
-import pandas as pd
+import re
 import streamlit as st
 from modules.authorization import current
 from modules.remediation import respond_to_incident, response_target
@@ -15,18 +15,41 @@ def response_center(rows):
     if not alerts:
         st.info("No compromised or high-risk account alerts.")
         return
-    selected_user = st.radio("Compromised User Alert", [a["user"] for a in alerts])
-    alert = next(a for a in alerts if a["user"] == selected_user)
-    identity = (current().tenant_id, selected_user, str(alert["incident_id"]))
+    tenant = current().tenant_id
+    identities = [(tenant, alert["user"], str(alert["incident_id"])) for alert in alerts]
+    selected = st.session_state.get("center_selection")
+    selected_index = identities.index(selected) if selected in identities else 0
+
+    def select_alert(index):
+        st.session_state["center_clicked_alert"] = identities[index]
+
+    clicked = st.session_state.pop("center_clicked_alert", None)
+    if clicked in identities:
+        selected_index = identities.index(clicked)
+    with st.container(key="account_alerts"):
+        st.subheader("Compromised User Alerts")
+        for index, item in enumerate(alerts):
+            active = index == selected_index
+            user = re.sub(r"([^\w@.+-])", r"\\\1", " ".join(str(item["user"]).split()))
+            ip = re.sub(r"([^\w.:+-])", r"\\\1", " ".join(str(item["source_ip"]).split()))
+            st.button(
+                f"**{user}**{' · Selected' if active else ''}  \n"
+                f"*{item['pattern']}*  \n"
+                f"Source IP {ip} · Failed {item['failed']} · Success {item['success']}",
+                key=f"account_alert_{index}",
+                type="primary" if active else "secondary",
+                on_click=select_alert,
+                args=(index,),
+                width="stretch",
+            )
+    alert = alerts[selected_index]
+    identity = identities[selected_index]
     if st.session_state.get("center_selection") != identity:
         st.session_state["center_selection"] = identity
         st.session_state.pop("center_sigma", None)
         st.session_state.pop("center_actions", None)
         st.session_state.pop("center_response", None)
-    st.dataframe(pd.DataFrame([{
-        "UPN": alert["user"], "Source IP": alert["source_ip"], "Failed": alert["failed"],
-        "Success": alert["success"], "Attack pattern": alert["pattern"], "Timestamp (UTC)": alert["timestamp"],
-    }]), hide_index=True, width="stretch")
+    st.caption(f"Selected alert timestamp (UTC) · {alert['timestamp']}")
     writable = current().role in {"Admin", "SOC Analyst"}
     st.subheader("AI Sigma Rule Generator")
     if st.button("Generate Sigma Rule", disabled=not writable, width="content"):
